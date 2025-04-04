@@ -13,5 +13,30 @@
       "name": "Glossier",
       "url": "https://www.glossier.com",
       "instagram_handle": "glossier"
+    },
+    {
+      "name": "Adidas",
+      "url": "https://www.adidas.com",
+      "instagram_handle": "adidas"
+    },
+    {
+      "name": "Nike",
+      "url": "https://www.nike.com",
+      "instagram_handle": "nike"
+    },
+    {
+      "name": "Apple",
+      "url": "https://www.apple.com",
+      "instagram_handle": "apple"
+    },
+    {
+      "name": "Starbucks",
+      "url": "https://www.starbucks.com",
+      "instagram_handle": "starbucks"
+    },
+    {
+      "name": "National Geographic",
+      "url": "https://www.nationalgeographic.com",
+      "instagram_handle": "natgeo"
     }
   ]
