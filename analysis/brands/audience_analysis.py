@@ -5,6 +5,12 @@ import re
 
 from analysis.common.llm_client import get_gemini_json_response
 
+# Import data collection functions - add these at the top
+from apify.instagram_posts import collect_instagram_posts
+from apify.instagram_profile import collect_instagram_profile
+from apify.instagram_comments import collect_post_comments
+from apify.instagram_hashtags import collect_hashtag_posts
+
 async def generate_audience_insights_with_llm(icp_data: List[Dict[str, Any]], brand_name: str, brand_handle: str) -> Dict[str, Any]:
     """
     Generate audience insights from a list of ICP data
@@ -125,141 +131,338 @@ async def generate_audience_insights_with_llm(icp_data: List[Dict[str, Any]], br
 
 async def analyze_comment_quality(comment: Dict[str, Any]) -> Dict[str, Any]:
     """
-    Analyzes a comment to determine its sentiment, authenticity, and relevance.
-    Helps filter out bot comments, spam, and negative sentiment.
+    Analyze a comment's quality using rule-based approach
     
     Args:
         comment: Comment data dictionary
         
     Returns:
-        The original comment with added quality metrics
+        Dictionary with quality score and analysis
     """
-    # Extract comment data
-    username = comment.get("ownerUsername", "")
     text = comment.get("text", "")
+    username = comment.get("ownerUsername", "unknown")
     
     # Skip empty comments
-    if not text or not username:
-        comment["quality_score"] = 0
-        comment["is_likely_bot"] = True
-        comment["sentiment"] = "neutral"
-        return comment
+    if not text:
+        return {
+            "username": username,
+            "text": text,
+            "quality_score": 0,
+            "quality_category": "poor",
+            "reasoning": "Empty comment"
+        }
     
-    # Initialize quality metrics
-    quality_metrics = {
-        "is_likely_bot": False,
-        "sentiment": "neutral",
-        "quality_score": 50  # Default middle score
-    }
+    # Initialize base score
+    quality_score = 0
     
-    # Bot detection signals
-    bot_signals = [
-        # Generic/spam phrases
-        any(phrase in text.lower() for phrase in [
-            "check my profile", "check out my", "follow me", "dm me", "click my bio", 
-            "click the link", "earn money", "make money", "join now", "discount code",
-            "promo code", "free followers", "visit my page", "visit my profile",
-            "follow back", "follow for follow", "f4f", "l4l", "like for like"
-        ]),
-        
-        # Excessive emoji usage (more than 50% of content)
-        sum(1 for char in text if ord(char) > 127) > len(text) * 0.5,
-        
-        # Very short generic comments
-        len(text) < 5 and text.lower() in ["nice", "cool", "wow", "omg", "love", "lol", "🔥", "👍", "❤️", "🙌"],
-        
-        # Username patterns common in bot accounts
-        bool(re.search(r'[0-9]{4,}$', username)),  # Ends with 4+ digits
-        bool(re.search(r'^[a-z]+[0-9]{4,}', username))  # Letters followed by digits
+    # Length factor (0-40 points)
+    # Short comments receive fewer points
+    length = len(text)
+    if length > 100:
+        quality_score += 40
+    elif length > 50:
+        quality_score += 30
+    elif length > 20:
+        quality_score += 20
+    elif length > 10:
+        quality_score += 10
+    else:
+        quality_score += 5
+    
+    # Complexity factor (0-30 points)
+    # Simple comments with just emojis or basic phrases receive fewer points
+    # Count word diversity
+    words = text.split()
+    unique_words = set(words)
+    
+    # More diverse vocabulary = higher score
+    word_diversity = len(unique_words) / max(1, len(words))
+    quality_score += min(30, int(word_diversity * 30))
+    
+    # Engagement factor (0-30 points)
+    # Comments that ask questions or show deeper engagement
+    engagement_indicators = [
+        "?", "what", "how", "when", "why", "where", "who",
+        "love", "amazing", "great", "awesome", "thank", "thanks",
+        "beautiful", "perfect", "agree", "disagree", "opinion",
+        "think", "believe", "feel", "experience", "recommend"
     ]
     
-    # Calculate bot probability
-    bot_likelihood = sum(bot_signals) / len(bot_signals)
-    quality_metrics["is_likely_bot"] = bot_likelihood > 0.4  # If more than 40% of signals are present
+    # Count engagement indicators
+    engagement_count = sum(1 for indicator in engagement_indicators if indicator in text.lower())
+    quality_score += min(30, engagement_count * 5)
     
-    # Sentiment analysis - simple approach
-    positive_terms = ["love", "great", "amazing", "awesome", "beautiful", "perfect", "excellent", "stunning", "favorite", "best", "incredible"]
-    negative_terms = ["bad", "worst", "terrible", "ugly", "hate", "disappointing", "poor", "awful", "horrible", "waste", "useless"]
-    
-    positive_count = sum(1 for term in positive_terms if term in text.lower())
-    negative_count = sum(1 for term in negative_terms if term in text.lower())
-    
-    if positive_count > negative_count:
-        quality_metrics["sentiment"] = "positive"
-    elif negative_count > positive_count:
-        quality_metrics["sentiment"] = "negative"
+    # Categorize quality
+    if quality_score >= 70:
+        quality_category = "excellent"
+        reasoning = "High-quality, thoughtful comment with substance"
+    elif quality_score >= 50:
+        quality_category = "good"
+        reasoning = "Good comment showing engagement"
+    elif quality_score >= 30:
+        quality_category = "average"
+        reasoning = "Average comment with some substance"
     else:
-        quality_metrics["sentiment"] = "neutral"
+        quality_category = "poor"
+        reasoning = "Brief or low-effort comment"
     
-    # Calculate overall quality score (0-100)
-    base_score = 50
-    
-    # Deduct for bot likelihood
-    bot_penalty = bot_likelihood * 50  # Up to -50 points
-    
-    # Adjust for sentiment
-    sentiment_modifier = 0
-    if quality_metrics["sentiment"] == "positive":
-        sentiment_modifier = 20
-    elif quality_metrics["sentiment"] == "negative":
-        sentiment_modifier = -10
-    
-    # Adjust for length and substance
-    length_modifier = min(20, len(text) / 10)  # Up to +20 for length
-    
-    # Calculate final score
-    final_score = base_score - bot_penalty + sentiment_modifier + length_modifier
-    
-    # Ensure score is in 0-100 range
-    quality_metrics["quality_score"] = max(0, min(100, int(final_score)))
-    
-    # Add quality metrics to comment
-    comment.update(quality_metrics)
-    
-    return comment
+    return {
+        "username": username,
+        "text": text,
+        "quality_score": quality_score,
+        "quality_category": quality_category,
+        "reasoning": reasoning
+    }
 
 async def filter_hashtag_relevance(brand_handle: str, hashtag: str) -> float:
     """
-    Evaluates the relevance of a hashtag to the brand.
+    Determine if a hashtag is relevant to a brand
     
     Args:
-        brand_handle: Brand's Instagram handle
-        hashtag: Hashtag to evaluate (without # symbol)
+        brand_handle: Instagram handle of the brand
+        hashtag: Hashtag to check (without # symbol)
         
     Returns:
-        Relevance score between 0-1
+        Relevance score (0.0-1.0)
     """
-    brand_name = brand_handle.lower()
+    # Simple relevance check - can be enhanced with more sophisticated logic
+    
+    # Convert to lowercase for comparison
+    brand_handle = brand_handle.lower()
     hashtag = hashtag.lower()
     
-    # Direct brand match
-    if brand_name in hashtag or hashtag in brand_name:
-        return 0.9  # Very high relevance
+    # Exact match with brand handle
+    if brand_handle in hashtag or hashtag in brand_handle:
+        return 1.0
     
-    # Check for common variations
-    brand_variations = [
-        brand_name,
-        f"{brand_name}s",
-        ''.join(word for word in brand_name if word.isalnum()),  # Remove special chars
-        ''.join(c for c in brand_name if c.isalpha())  # Letters only
+    # Check common brand hashtag patterns
+    common_variations = [
+        f"{brand_handle}style",
+        f"{brand_handle}life",
+        f"{brand_handle}community",
+        f"{brand_handle}fam",
+        f"{brand_handle}lover",
+        f"{brand_handle}fan",
+        f"love{brand_handle}",
+        f"team{brand_handle}"
     ]
     
-    for variation in brand_variations:
+    for variation in common_variations:
         if variation in hashtag or hashtag in variation:
-            return 0.7  # High relevance
+            return 0.9
     
-    # Check for partial matches (at least 4 chars)
-    if len(brand_name) >= 4 and len(hashtag) >= 4:
-        if brand_name[:4] in hashtag or hashtag[:4] in brand_name:
-            return 0.4  # Medium relevance
+    # Similarity check - use fuzzy matching or edit distance for more sophisticated check
+    # For now, use simple character overlap
+    if len(brand_handle) > 3 and len(hashtag) > 3:
+        overlap = sum(1 for char in brand_handle if char in hashtag) / len(brand_handle)
+        if overlap > 0.7:
+            return 0.7
     
-    # For short brand names, be more careful
-    if len(brand_name) < 4:
-        # Only exact matches should be considered relevant
-        return 0.2  # Low relevance by default
+    # Default - lower relevance
+    return 0.1
+
+async def collect_users_from_hashtags(brand_handle: str, limit: int = 50) -> List[Dict[str, Any]]:
+    """
+    Collect users from hashtag posts
+    
+    Args:
+        brand_handle: Instagram handle of the brand
+        limit: Maximum number of users to return
+        
+    Returns:
+        List of users from hashtag posts
+    """
+    print(f"Collecting users from hashtags for @{brand_handle}")
+    
+    try:
+        # Get brand-related hashtags
+        hashtags = [
+            brand_handle,
+            f"{brand_handle}style",
+            f"{brand_handle}community"
+        ]
+        
+        all_users = []
+        seen_usernames = set()
+        
+        for hashtag in hashtags:
+            print(f"Checking hashtag #{hashtag}")
             
-    # Default low relevance
-    return 0.3
+            # Check relevance
+            relevance = await filter_hashtag_relevance(brand_handle, hashtag)
+            if relevance < 0.5:
+                print(f"Skipping hashtag #{hashtag} - low relevance")
+                continue
+            
+            # Collect hashtag posts
+            hashtag_posts = await collect_hashtag_posts(hashtag, limit=10)
+            
+            if not hashtag_posts:
+                print(f"No posts found for hashtag #{hashtag}")
+                continue
+            
+            # Extract users from posts
+            for post in hashtag_posts:
+                username = post.get("ownerUsername")
+                if username and username != brand_handle and username not in seen_usernames:
+                    all_users.append({
+                        "username": username,
+                        "source": f"hashtag_{hashtag}",
+                        "relevance": relevance
+                    })
+                    seen_usernames.add(username)
+                    
+                    if len(all_users) >= limit:
+                        break
+            
+            if len(all_users) >= limit:
+                break
+        
+        print(f"Collected {len(all_users)} users from hashtag posts")
+        return all_users
+        
+    except Exception as e:
+        print(f"Error collecting users from hashtags: {str(e)}")
+        return []
+
+async def collect_instagram_followers(instagram_handle: str, limit: int = 50, quality_threshold: int = 30) -> List[Dict[str, Any]]:
+    """
+    Collect Instagram followers with comment quality analysis
+    
+    Args:
+        instagram_handle: Instagram handle to collect followers for
+        limit: Maximum number of followers to return
+        quality_threshold: Minimum quality score (0-100) for comments
+        
+    Returns:
+        List of followers with quality scores
+    """
+    print(f"Collecting engaged users for @{instagram_handle}")
+    print(f"Using quality threshold: {quality_threshold}")
+    
+    # Get posts to analyze comments
+    posts = await collect_instagram_posts(instagram_handle, limit=5)
+    
+    if not posts:
+        print("No posts found to analyze")
+        return []
+    
+    # Store quality users with their scores
+    quality_users = {}
+    analyzed_count = 0
+    
+    # Analyze comments on each post
+    for post in posts:
+        post_id = post.get("shortCode", "")
+        if not post_id:
+            continue
+        
+        print(f"Analyzing comments for post {post_id}")
+        
+        # Get comments for this post
+        comments = await collect_post_comments(post_id, limit=30)
+        
+        for comment in comments:
+            username = comment.get("ownerUsername", "")
+            
+            # Skip comments from the brand itself
+            if not username or username.lower() == instagram_handle.lower():
+                continue
+            
+            # Analyze comment quality
+            quality = await analyze_comment_quality(comment)
+            quality_score = quality.get("quality_score", 0)
+            analyzed_count += 1
+            
+            # Only keep users above threshold
+            if quality_score >= quality_threshold:
+                if username not in quality_users or quality_score > quality_users[username]["quality_score"]:
+                    quality_users[username] = {
+                        "username": username,
+                        "quality_score": quality_score,
+                        "comment_text": comment.get("text", ""),
+                        "comment_quality": quality.get("quality_category", "unknown"),
+                        "source": "comment"
+                    }
+    
+    # Convert to list and sort by quality score
+    users_list = list(quality_users.values())
+    users_list.sort(key=lambda u: u.get("quality_score", 0), reverse=True)
+    
+    print(f"Comment analysis complete:")
+    print(f"  - Analyzed {analyzed_count} comments")
+    print(f"  - Found {len(users_list)} users above quality threshold of {quality_threshold}")
+    
+    # Return limited list
+    return users_list[:limit]
+
+async def enhanced_audience_collection(instagram_handle: str, limit: int = 50, quality_threshold: int = 30) -> List[Dict[str, Any]]:
+    """
+    A simplified approach to collect an audience that uses rule-based username analysis
+    to identify real people.
+    
+    Args:
+        instagram_handle: Instagram handle to collect audience for
+        limit: Maximum number of users to return
+        quality_threshold: Minimum quality score (for initial filtering)
+    
+    Returns:
+        List of users identified as likely real people
+    """
+    print(f"🔍 Enhanced audience collection for @{instagram_handle}")
+    print(f"  Using comment quality threshold: {quality_threshold}")
+    
+    # First collect users with a MUCH LOWER threshold than specified
+    # to get more candidates (we'll still filter later)
+    actual_threshold = max(5, quality_threshold - 25)  # Use an extremely low bar to get more candidates
+    standard_users = await collect_instagram_followers(instagram_handle, limit=limit*3, quality_threshold=actual_threshold)
+    
+    if not standard_users or len(standard_users) < limit:
+        print("Not enough users found. Trying alternate collection methods...")
+        # Try hashtag-based collection as additional source with very low quality requirements
+        hashtag_users = await collect_users_from_hashtags(instagram_handle, limit=limit*2)
+        
+        # Combine users from both sources, avoiding duplicates
+        if hashtag_users:
+            existing_usernames = {user.get("username") for user in standard_users}
+            for user in hashtag_users:
+                if user.get("username") not in existing_usernames:
+                    standard_users.append(user)
+                    existing_usernames.add(user.get("username"))
+    
+    if not standard_users:
+        print("⚠️ Could not collect any users for analysis")
+        return []
+    
+    # Extract usernames
+    all_usernames = [user.get("username") for user in standard_users if user.get("username")]
+    
+    print(f"  - Collected {len(all_usernames)} potential users before filtering")
+    
+    # Use our simplified rule-based approach
+    real_people_data = await identify_real_people_from_usernames(all_usernames, instagram_handle)
+    
+    # Create dictionary for easy lookup
+    real_people_dict = {entry.get("username"): entry for entry in real_people_data}
+    
+    # Enhance original users with classification and filter
+    enhanced_users = []
+    for user in standard_users:
+        username = user.get("username", "")
+        if username in real_people_dict:
+            # Get classification
+            data = real_people_dict[username]
+            user["classification"] = "likely_person"
+            user["engagement_quality"] = data.get("engagement_quality", "low")
+            user["reasoning"] = data.get("reasoning", "")
+            enhanced_users.append(user)
+    
+    print(f"Enhanced audience collection complete:")
+    print(f"  - Starting users: {len(standard_users)}")
+    print(f"  - After rule-based filtering: {len(enhanced_users)}")
+    
+    # Return all users classified as real people, up to the increased limit
+    return enhanced_users[:limit]
 
 async def identify_real_people_from_usernames(usernames: List[str], brand_handle: str) -> List[Dict[str, Any]]:
     """

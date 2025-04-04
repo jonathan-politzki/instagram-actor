@@ -35,26 +35,38 @@ def get_gemini_json_response(model: str, prompts: List[str], retries: int = 3) -
     attempts = 0
     last_error = None
     
+    # Convert legacy model names to correct model names based on API documentation
+    # Standard stable model names as of April 2025
+    if model == "gemini-pro":
+        model_name = "gemini-1.5-pro"  # Use the stable 1.5 Pro model
+    elif model == "gemini-pro-vision":
+        model_name = "gemini-1.5-pro"  # Use the stable 1.5 Pro model which also handles vision
+    else:
+        model_name = model
+    
     # Adding explicit JSON formatting to the prompt
     structured_prompts = []
     for prompt in prompts:
         # Add JSON formatting instructions if not already present
         if "return a JSON" not in prompt.lower() and "respond with json" not in prompt.lower():
-            prompt += "\n\nRespond with a valid JSON object. Ensure your response can be parsed by JSON.parse()."
+            prompt += "\n\nPlease respond with a valid JSON object only. Format your entire response as a valid JSON that can be parsed by JSON.parse()."
         structured_prompts.append(prompt)
     
     while attempts < retries:
         try:
+            # Configure the model with the appropriate settings
+            generation_config = {
+                "temperature": 0.2,
+                "top_p": 0.95,
+                # response_mime_type is not supported in current API version
+            }
+            
+            # Load the model
+            model_obj = genai.GenerativeModel(model_name=model_name, generation_config=generation_config)
+            
             # Generate content with Gemini
-            response = genai.generate_content(
-                model=model,
-                contents=structured_prompts,
-                generation_config={
-                    "temperature": 0.2,
-                    "top_p": 0.95,
-                    "response_mime_type": "application/json",
-                }
-            )
+            prompt_text = "\n".join(structured_prompts)
+            response = model_obj.generate_content(prompt_text)
             
             # Extract response text
             response_text = response.text
