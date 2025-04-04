@@ -1,18 +1,20 @@
 # Instagram Analysis & Prospect Discovery System
 
-A tool that analyzes Instagram profiles, identifies ideal customer profiles (ICPs) from followers and engaged users, and helps brands understand their audience for improved marketing strategies.
+A tool that analyzes Instagram profiles, identifies ideal customer profiles (ICPs) from followers and engaged users, and helps brands understand their audience for improved marketing strategies. It can also analyze individual Instagram user profiles for influence metrics.
 
 ## Overview
 
 This system combines AI and rule-based approaches to:
 1. Analyze Instagram brand profiles
-2. Identify engaged users and potential ideal customers
-3. Filter for real people vs. bots or businesses
-4. Generate marketing insights and recommendations
+2. Analyze Instagram user profiles
+3. Identify engaged users and potential ideal customers
+4. Filter for real people vs. bots or businesses
+5. Generate marketing insights and recommendations
 
 ## Current Implementation Status
 
 - ✅ Brand profile and posts collection via Apify
+- ✅ User profile and influence analysis
 - ✅ Comment collection and analysis
 - ✅ User filtering based on quality thresholds
 - ✅ Public profile detection to save analysis time
@@ -20,39 +22,86 @@ This system combines AI and rule-based approaches to:
 - ✅ AI-powered analysis using Google's Gemini models
 - ✅ Basic audience insights generation
 - ✅ Command-line interface with various options
+- ✅ Modular architecture separating data collection from analysis
+
+## Project Structure
+
+The project is organized into the following structure:
+
+```
+instagram-actor/
+├── apify/                      # Data collection via Apify
+│   ├── client.py               # Apify client configuration
+│   ├── instagram_profile.py    # Profile data collection
+│   ├── instagram_posts.py      # Posts data collection
+│   ├── instagram_comments.py   # Comments data collection
+│   └── instagram_hashtags.py   # Hashtag data collection
+│
+├── analysis/                   # Analysis logic 
+│   ├── common/                 # Shared analysis functions
+│   │   └── llm_client.py       # LLM API client (Gemini)
+│   │
+│   ├── brands/                 # Brand-specific analysis
+│   │   ├── brand_analysis.py   # Brand profile analysis
+│   │   └── audience_analysis.py # Brand audience analysis
+│   │
+│   └── users/                  # User-specific analysis
+│       ├── user_analysis.py    # User profile analysis
+│       └── influence_analysis.py # User influence analysis
+│
+├── utils/                      # Utility functions
+│   ├── cache.py                # Caching utilities
+│   ├── rate_limit.py           # Rate limiting
+│   └── image_utils.py          # Image processing utilities
+│
+├── app.py                      # Main coordinator application
+├── brand_analyzer.py           # Command-line tool for brand analysis
+├── user_analyzer.py            # Command-line tool for user analysis
+```
 
 ## System Components
 
-### Data Collection
+### Data Collection (apify/)
 - Instagram profile data collection
 - Post collection with engagement metrics
 - Comment extraction and quality analysis
 - User profile analysis
 
-### Analysis Features
-- Comment quality scoring (0-100)
-- Bot detection using pattern recognition
-- Public profile detection before deeper analysis
-- Username pattern analysis for filtering
-- AI-enhanced profile and content analysis
+### Brand Analysis (analysis/brands/)
+- Brand profile analysis with LLM
+- Audience analysis and segmentation
+- Engaged user identification
+- Content recommendations
+
+### User Analysis (analysis/users/)
+- User profile analysis with LLM
+- Influence metrics calculation
+- Content theme detection
+- Engagement quality assessment
+
+### Utilities (utils/)
+- Caching system for API responses
+- Rate limiting for Apify requests
+- Image processing for LLM analysis
 
 ### Output
 - Brand analysis including tone, style, and positioning
 - Ideal customer profile identification
 - Audience demographics and interests
 - Content and engagement recommendations
+- User influence metrics and brand alignment potential
 
 ## Data Storage
 
 The system creates various data files:
 
-* **Cache Files**:
-  * `cache/{instagram_handle}_profile.json` - Instagram profile data
-  * `cache/{instagram_handle}_posts.json` - Instagram posts
-  * `cache/{instagram_handle}_followers.json` - Instagram followers
-  * `cache/{username}_profile.json` - Follower profile data
+* **Cache Files**: Stored in the `cache/` directory
+  * Profile data, posts, followers, and other API responses
 
-* **Results**: `results/{instagram_handle}_{timestamp}.json` - Complete analysis including ICPs and insights
+* **Results**: Stored in the `results/` directory
+  * Brand analysis results
+  * User analysis results
+  * Includes timestamps for tracking
 
 ## Setting Up
 
@@ -97,23 +146,54 @@ Create a `brands.json` file with your target brands:
 
 ## Running the System
 
-### Command Line Options
+### Main Application (Recommended)
+
+The `app.py` script is the main entry point that can handle both brand and user analysis:
 
 ```bash
-# List available brands
-python instagram_analysis.py --list
+# Auto-detect and analyze an Instagram handle
+python app.py instagramhandle
+
+# Force brand analysis
+python app.py instagramhandle --type brand
+
+# Force user analysis
+python app.py instagramhandle --type user
+
+# Process multiple handles from a JSON file
+python app.py --file handles.json
+
+# Use rule-based analysis instead of LLM
+python app.py instagramhandle --no-llm
+```
+
+### Brand Analysis
+
+```bash
+# List available brands in brands.json
+python brand_analyzer.py --list
 
 # Process a specific brand
-python instagram_analysis.py --brand brandname
+python brand_analyzer.py --brand brandname
 
-# Process all brands
-python instagram_analysis.py
+# Process all brands in brands.json
+python brand_analyzer.py
 
 # Set quality threshold (0-100) for filtering - lower values cast a wider net
-python instagram_analysis.py --quality-threshold 30
+python brand_analyzer.py --quality-threshold 30
+```
 
-# Manually add known engaged users
-python instagram_analysis.py --add-engaged-users brandname,user1,user2,user3
+### User Analysis
+
+```bash
+# Analyze a single user
+python user_analyzer.py --user username
+
+# Process multiple users from a JSON file
+python user_analyzer.py --file users.json
+
+# Use rule-based analysis instead of LLM
+python user_analyzer.py --user username --no-llm
 ```
 
 ## Key Features
@@ -132,27 +212,37 @@ Google's Gemini models provide deeper analysis:
 - User profile interpretation
 - Audience segment identification
 - Content and engagement recommendations
+- User influence characteristics
 
 ### Public Profile Detection
 
-The system now pre-checks if profiles are public before attempting deeper analysis, saving time and API calls.
+The system pre-checks if profiles are public before attempting deeper analysis, saving time and API calls.
 
-### Customizable Quality Thresholds
+### Modular Architecture
 
-You can adjust the quality threshold to balance between:
-- Higher thresholds (70+): Stricter filtering, fewer but higher quality results
-- Medium thresholds (30-70): Balanced approach
-- Lower thresholds (<30): Cast a wider net, more results but potentially lower quality
+The new architecture separates:
+- Data collection (Apify calls)
+- Analysis logic (both LLM-based and rule-based)
+- Utilities (caching, rate limiting)
+- Command-line interfaces
+
+This allows for:
+- Easier maintenance
+- Better code organization
+- Flexibility to add new features
+- Support for both brand and user analysis
 
 ## Technical Implementation
 
-### Key Algorithms
+### Key Modules
 
-- `analyze_comment_quality`: Evaluates comments on multiple dimensions
-- `identify_real_people_from_usernames`: Uses AI to classify usernames
-- `enhanced_audience_collection`: Combines multiple filtering methods
-- `check_profile_visibility`: Efficiently determines if profiles are public
-- `analyze_brand_profile_with_llm` & `analyze_user_profile_with_llm`: AI-driven analysis
+- **apify/**: Handles all Instagram data collection
+- **analysis/brands/**: Brand analysis logic
+- **analysis/users/**: User analysis logic
+- **utils/**: Shared utilities
+- **app.py**: Main coordinator
+- **brand_analyzer.py**: Brand-specific CLI
+- **user_analyzer.py**: User-specific CLI
 
 ### API Dependencies
 

@@ -1,211 +1,44 @@
 import os
 import json
-import base64
-import random
+import re
 import asyncio
 import time
+import sys
+import traceback
 from datetime import datetime
 from typing import Dict, List, Any, Optional, Tuple
 from dotenv import load_dotenv
 import google.generativeai as genai
-from apify_client import ApifyClient
-import requests
-from PIL import Image
-from io import BytesIO
-from tqdm.asyncio import tqdm_asyncio
-import sys
-import re
-import traceback
+import random
+
+# Import functions from instagram_data
+from instagram_data import (
+    collect_instagram_profile, 
+    collect_instagram_posts,
+    collect_post_comments,
+    collect_hashtag_posts,
+    check_profile_visibility,
+    collect_user_profile_posts,
+    encode_image_to_base64,
+    rate_limit
+)
 
 # Load environment variables
 load_dotenv()
 
 # Configure API keys
-APIFY_API_KEY = os.getenv("APIFY_API_KEY")
 GEMINI_API_KEY = os.getenv("GEMINI_API_KEY")
 
 # Configure Gemini
 genai.configure(api_key=GEMINI_API_KEY)
 
-# Initialize Apify client
-apify_client = ApifyClient(APIFY_API_KEY)
-
-# Create directories
+# Create directories if they don't exist
 os.makedirs("cache", exist_ok=True)
 os.makedirs("results", exist_ok=True)
 
-# Rate limiting settings
-LAST_API_CALL = {}  # Store timestamps of last API calls
-
-async def rate_limit(api_name: str, min_delay_seconds: float = 1.0):
-    """
-    Implement rate limiting for API calls to prevent hitting rate limits
-    """
-    now = time.time()
-    last_call = LAST_API_CALL.get(api_name, 0)
-    elapsed = now - last_call
-    
-    if elapsed < min_delay_seconds:
-        delay = min_delay_seconds - elapsed
-        print(f"Rate limiting: waiting {delay:.2f}s for {api_name} API")
-        await asyncio.sleep(delay)
-    
-    LAST_API_CALL[api_name] = time.time()
-
 # ==========================================
-# Data Collection Functions
+# Analysis Functions
 # ==========================================
-
-async def collect_instagram_profile(instagram_handle: str) -> Dict[str, Any]:
-    """
-    Collect Instagram profile data for a Shopify store
-    """
-    print(f"Collecting Instagram profile for @{instagram_handle}")
-    
-    # Check cache first
-    cache_file = f"cache/{instagram_handle}_profile.json"
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            cached_data = json.load(f)
-            # Check if cache is less than 1 day old
-            cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
-            if (datetime.now() - cache_time).days < 1:
-                print(f"Using cached profile data for @{instagram_handle}")
-                return cached_data
-    
-    try:
-        # Apply rate limiting
-        await rate_limit("instagram_profile", 2.0)
-        
-        # Run the Instagram profile scraper actor
-        run_input = {
-            "usernames": [instagram_handle],
-            "resultsType": "details",
-            "extendOutputFunction": """
-                ($) => {
-                    return {
-                        username: $.username,
-                        fullName: $.full_name,
-                        biography: $.biography,
-                        followersCount: $.edge_followed_by.count,
-                        followingCount: $.edge_follow.count,
-                        postsCount: $.edge_owner_to_timeline_media.count,
-                        profilePicUrl: $.profile_pic_url_hd,
-                        isBusinessAccount: $.is_business_account,
-                        businessCategory: $.business_category_name
-                    }
-                }
-            """
-        }
-        
-        run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=run_input)
-        items = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-        
-        if not items:
-            raise Exception(f"No profile data found for @{instagram_handle}")
-        
-        profile_data = items[0]
-        profile_data["cache_timestamp"] = datetime.now().isoformat()
-        
-        # Save to cache
-        with open(cache_file, 'w') as f:
-            json.dump(profile_data, f, indent=2)
-        
-        return profile_data
-    
-    except Exception as e:
-        print(f"Error collecting Instagram profile: {str(e)}")
-        raise
-
-async def collect_instagram_posts(instagram_handle: str, limit: int = 10) -> List[Dict[str, Any]]:
-    """
-    Collect Instagram posts for a brand's Instagram account
-    """
-    print(f"Collecting Instagram posts for @{instagram_handle}")
-    
-    # Check cache first
-    cache_file = f"cache/{instagram_handle}_posts.json"
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            cached_data = json.load(f)
-            # Check if cache is less than 1 day old
-            cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
-            if (datetime.now() - cache_time).days < 1:
-                posts = cached_data["posts"]
-                print(f"Using cached posts data for @{instagram_handle} ({len(posts)} posts)")
-                if len(posts) < 3:
-                    print(f"Warning: Only {len(posts)} cached posts found, collecting fresh data")
-                else:
-                    return posts
-    
-    try:
-        # Apply rate limiting
-        await rate_limit("instagram_posts", 2.0)
-        
-        # Try the main Instagram scraper actor first with correct parameters
-        print(f"Collecting posts with apify/instagram-scraper...")
-        run_input = {
-            "profiles": [instagram_handle],  # Using 'profiles' rather than 'usernames'
-            "resultsType": "posts",
-            "resultsLimit": limit * 2,  # Request more posts to ensure we get at least 'limit'
-            "addParentData": False,
-            "searchType": "user",
-            "searchLimit": limit * 2
-        }
-        
-        # First try the main Instagram scraper
-        try:
-            run = apify_client.actor("apify/instagram-scraper").call(run_input=run_input, timeout_secs=120)
-            posts = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-            
-            if not posts:
-                raise Exception("No posts returned by instagram-scraper")
-                
-        except Exception as e:
-            print(f"First scraper failed: {str(e)}, trying profile scraper...")
-            # Fallback to the profile scraper
-            profile_run_input = {
-                "usernames": [instagram_handle],
-                "resultsType": "posts",
-                "resultsLimit": limit,
-                "extendOutputFunction": """
-                    ($) => {
-                        return {
-                            id: $.id,
-                            shortCode: $.shortcode,
-                            caption: $.edge_media_to_caption?.edges[0]?.node?.text,
-                            commentsCount: $.edge_media_to_comment?.count,
-                            dimensionsHeight: $.dimensions?.height,
-                            dimensionsWidth: $.dimensions?.width,
-                            displayUrl: $.display_url,
-                            likesCount: $.edge_media_preview_like?.count,
-                            timestamp: $.taken_at_timestamp,
-                            url: `https://www.instagram.com/p/${$.shortcode}/`
-                        }
-                    }
-                """
-            }
-            
-            run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input, timeout_secs=120)
-            posts = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-        
-        print(f"Successfully collected {len(posts)} posts for @{instagram_handle}")
-        
-        # Cache the results
-        cache_data = {
-            "posts": posts,
-            "cache_timestamp": datetime.now().isoformat()
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(cache_data, f, indent=2)
-        
-        return posts
-    
-    except Exception as e:
-        print(f"Error collecting Instagram posts: {str(e)}")
-        # Return empty list instead of raising to prevent analysis from failing
-        return []
 
 async def analyze_comment_quality(comment: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -330,627 +163,6 @@ async def filter_hashtag_relevance(brand_handle: str, hashtag: str) -> float:
             
     # Default low relevance
     return 0.3
-
-async def collect_users_from_hashtags(instagram_handle: str, limit: int = 30) -> List[Dict[str, Any]]:
-    """
-    Collect users who post content with hashtags related to the brand.
-    This is another proxy for finding potential customers or brand followers.
-    Includes improved relevance filtering.
-    """
-    print(f"Collecting users from hashtags related to @{instagram_handle}")
-    
-    try:
-        # Get brand profile to extract potential brand-related terms
-        profile_data = await collect_instagram_profile(instagram_handle)
-        
-        # Extract the real brand name carefully - use the Instagram handle as fallback
-        brand_name = profile_data.get("fullName", instagram_handle)
-        if brand_name:
-            # Extract the first word to avoid getting extra words that might not be part of the core brand
-            brand_name_parts = brand_name.split()
-            core_brand = brand_name_parts[0].lower() if brand_name_parts else instagram_handle.lower()
-        else:
-            core_brand = instagram_handle.lower()
-            
-        # Start with the most reliable hashtags - just the Instagram handle
-        hashtags_to_try = [instagram_handle.lower()]
-        
-        # Get category-specific hashtags based on the brand's bio
-        bio = profile_data.get("biography", "").lower()
-        
-        # Product-specific hashtags for different types of brands
-        if "plush" in bio or "toy" in bio or "stuffed" in bio or "squish" in bio or "soft" in bio:
-            # Plush toys or Squishable-like brands
-            hashtags_to_try.extend([
-                f"{instagram_handle}plush", 
-                "plushies", 
-                "plushcollector", 
-                "plushtoys", 
-                "kawaiiplush",
-                "cuteplush",
-                "plushiesofinstagram"
-            ])
-        elif "shoe" in bio or "sneaker" in bio or "footwear" in bio:
-            # Footwear brands
-            hashtags_to_try.extend([
-                f"{instagram_handle}shoes",
-                "shoelover",
-                "sneakerhead",
-                "footwear",
-                "shoeaddict"
-            ])
-        elif "glass" in bio or "eye" in bio or "spectacles" in bio or "frames" in bio:
-            # Eyewear brands
-            hashtags_to_try.extend([
-                f"{instagram_handle}glasses",
-                "eyewear",
-                "glasses",
-                "eyeglasses",
-                "frames"
-            ])
-        elif "beauty" in bio or "makeup" in bio or "skincare" in bio:
-            # Beauty brands
-            hashtags_to_try.extend([
-                f"{instagram_handle}beauty",
-                "beautyproducts",
-                "skincare",
-                "makeupaddicts",
-                "beautylovers"
-            ])
-        elif "coffee" in bio or "cafe" in bio or "tea" in bio:
-            # Coffee or cafe brands
-            hashtags_to_try.extend([
-                f"{instagram_handle}coffee",
-                "coffeelover",
-                "coffeeaddict",
-                "cafelife",
-                "coffeeculture"
-            ])
-        else:
-            # General brand hashtags
-            hashtags_to_try.extend([
-                f"{instagram_handle}fan",
-                f"love{instagram_handle}",
-                f"{instagram_handle}products"
-            ])
-        
-        # Get additional terms from bio that might be branded hashtags
-        bio_hashtags = []
-        for word in bio.split():
-            if word.startswith('#'):
-                tag = word[1:].lower()
-                # Make sure it's reasonably sized and unique
-                if len(tag) > 3:
-                    bio_hashtags.append(tag)
-        
-        # Add verified bio hashtags to our list
-        hashtags_to_try.extend(bio_hashtags)
-        
-        # Remove duplicates while preserving order
-        seen = set()
-        hashtags_to_try = [h for h in hashtags_to_try if not (h in seen or seen.add(h))]
-        
-        # Get posts from each hashtag
-        all_users = []
-        checked_hashtags = set()
-        
-        for hashtag in hashtags_to_try:
-            if len(hashtag) < 3:
-                continue  # Skip very short hashtags
-                
-            # Skip if we've already checked this hashtag
-            if hashtag in checked_hashtags:
-                continue
-                
-            checked_hashtags.add(hashtag)
-                
-            # Check relevance first using our improved filter
-            if hashtag != instagram_handle.lower() and not hashtag.startswith(instagram_handle.lower()):
-                # Keep stricter relevance check for non-exact matches
-                relevance = await filter_hashtag_relevance(instagram_handle, hashtag)
-                if relevance < 0.3 and not hashtag in bio_hashtags:
-                    print(f"Skipping low-relevance hashtag #{hashtag} (score: {relevance:.1f})")
-                    continue
-            else:
-                # Direct match gets top relevance
-                relevance = 0.9
-            
-            try:
-                # Apply rate limiting
-                await rate_limit("instagram_hashtags", 5.0)  # Longer delay for hashtag searches
-                
-                print(f"Searching hashtag #{hashtag} (relevance: {relevance:.1f})...")
-                
-                # Call the hashtag scraper
-                run_input = {
-                    "hashtags": [hashtag],
-                    "resultsLimit": 50  # Limit posts per hashtag
-                }
-                
-                run = apify_client.actor("apify/instagram-hashtag-scraper").call(run_input=run_input, timeout_secs=60)
-                hashtag_data = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-                
-                # Extract usernames from posts with their source hashtag
-                for item in hashtag_data:
-                    if "latestPosts" in item and isinstance(item["latestPosts"], list):
-                        for post in item["latestPosts"]:
-                            if "ownerUsername" in post and post["ownerUsername"] != instagram_handle:
-                                # Check if this post specifically mentions the brand
-                                caption = post.get("caption", "").lower()
-                                mentions_brand = any(term in caption for term in [instagram_handle.lower(), brand_name])
-                                
-                                # Include source hashtag for later relevance filtering
-                                all_users.append({
-                                    "username": post["ownerUsername"],
-                                    "source": "hashtag",
-                                    "source_hashtag": hashtag,
-                                    "relevance_score": relevance + (0.2 if mentions_brand else 0),
-                                    "mentions_brand": mentions_brand
-                                })
-                    elif "ownerUsername" in item and item["ownerUsername"] != instagram_handle:
-                        all_users.append({
-                            "username": item["ownerUsername"],
-                            "source": "hashtag",
-                            "source_hashtag": hashtag,
-                            "relevance_score": relevance
-                        })
-                
-                # If we have enough users, we can stop searching more hashtags
-                if len(all_users) >= limit * 2:  # Get extra for filtering
-                    break
-                    
-            except Exception as e:
-                print(f"Error searching hashtag #{hashtag}: {str(e)}")
-                continue
-        
-        # Remove duplicates by username with a preference for higher relevance
-        unique_users = {}
-        for user in all_users:
-            username = user["username"]
-            if username not in unique_users or user.get("relevance_score", 0) > unique_users[username].get("relevance_score", 0):
-                unique_users[username] = user
-        
-        # Convert back to list and sort by relevance score
-        result_users = list(unique_users.values())
-        result_users.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-        
-        # Return top users by relevance
-        return result_users[:limit]
-        
-    except Exception as e:
-        print(f"Error collecting users from hashtags: {str(e)}")
-        return []
-
-async def collect_instagram_followers(instagram_handle: str, limit: int = 50, quality_threshold: int = 60) -> List[Dict[str, Any]]:
-    """
-    Collect a sample of users engaged with a brand's Instagram profile.
-    Since direct follower scraping is limited, we use comments on posts as a proxy,
-    with hashtag analysis as a secondary method. Includes comment quality filtering.
-    
-    Args:
-        instagram_handle: The Instagram handle to collect followers for
-        limit: Maximum number of users to collect
-        quality_threshold: Minimum quality score (0-100) for comments
-    """
-    print(f"Collecting engaged users for @{instagram_handle} (quality threshold: {quality_threshold})")
-    
-    # Check cache first
-    cache_file = f"cache/{instagram_handle}_followers.json"
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            cached_data = json.load(f)
-            # Check if cache is less than 1 day old
-            cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
-            if (datetime.now() - cache_time).days < 1:
-                print(f"Using cached user data for @{instagram_handle}")
-                if cached_data.get("followers", []):
-                    return cached_data["followers"]
-    
-    try:
-        # First, get posts from the brand
-        posts = await collect_instagram_posts(instagram_handle, limit=10)
-        if not posts:
-            print(f"No posts found for @{instagram_handle}")
-            return []
-        
-        print(f"Found {len(posts)} posts, collecting comments...")
-        
-        # Collect all comments from posts
-        all_comments = []
-        
-        for post in posts:
-            if "shortCode" not in post:
-                continue
-                
-            post_id = post.get("shortCode")
-            
-            # Apply rate limiting
-            await rate_limit("instagram_comments", 3.0)
-            
-            # Get comments for this post using the Instagram Comment Scraper
-            try:
-                run_input = {
-                    "directUrls": [f"https://www.instagram.com/p/{post_id}/"],
-                    "resultsLimit": 50  # Get a reasonable number of comments per post
-                }
-                
-                run = apify_client.actor("apify/instagram-comment-scraper").call(run_input=run_input, timeout_secs=60)
-                comments = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-                all_comments.extend(comments)
-                
-                # If we have enough comments, we can stop collecting more posts
-                if len(all_comments) >= limit * 3:  # Collect more than needed for filtering
-                    break
-                    
-            except Exception as e:
-                print(f"Error collecting comments for post {post_id}: {str(e)}")
-                continue
-        
-        print(f"Analyzing quality of {len(all_comments)} comments...")
-        
-        # Analyze and filter comments
-        analyzed_comments = []
-        for comment in all_comments:
-            # Skip brand's own comments
-            if comment.get("ownerUsername") == instagram_handle:
-                continue
-                
-            # Analyze comment quality
-            analyzed_comment = await analyze_comment_quality(comment)
-            analyzed_comments.append(analyzed_comment)
-        
-        # Filter for high-quality comments
-        # Prioritize:
-        # 1. Non-bot comments
-        # 2. Positive or neutral sentiment
-        # 3. Higher quality scores that meet our threshold
-        quality_comments = [c for c in analyzed_comments 
-                           if not c.get("is_likely_bot", True) 
-                           and c.get("quality_score", 0) >= quality_threshold]
-        
-        # Sort by quality score (highest first)
-        quality_comments.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
-        
-        print(f"Found {len(quality_comments)} comments above quality threshold ({quality_threshold})")
-        
-        # Extract unique usernames from quality comments
-        engaged_users = []
-        seen_usernames = set()
-        
-        for comment in quality_comments:
-            username = comment.get("ownerUsername")
-            if username and username not in seen_usernames:
-                seen_usernames.add(username)
-                engaged_users.append({
-                    "username": username,
-                    "source": "comment",
-                    "sentiment": comment.get("sentiment", "neutral"),
-                    "quality_score": comment.get("quality_score", 0),
-                })
-        
-        # If we don't have enough users from comments, try hashtag analysis
-        if len(engaged_users) < limit:
-            print(f"Only found {len(engaged_users)} quality users from comments, trying hashtag analysis...")
-            
-            # Get hashtag-based users with relevance filtering
-            hashtag_followers = await collect_users_from_hashtags(instagram_handle, limit=limit*2)  # Get more for filtering
-            
-            # Filter hashtag users by added relevance criterion 
-            filtered_hashtag_users = []
-            
-            for user in hashtag_followers:
-                # If the user was found from hashtags, check for source hashtag relevance
-                source_hashtag = user.get("source_hashtag", "")
-                if source_hashtag:
-                    relevance = await filter_hashtag_relevance(instagram_handle, source_hashtag)
-                    if relevance >= 0.4:  # Only keep medium-high relevance
-                        user["relevance_score"] = relevance
-                        filtered_hashtag_users.append(user)
-                else:
-                    # If no specific source_hashtag, keep with lower priority
-                    user["relevance_score"] = 0.3
-                    filtered_hashtag_users.append(user)
-            
-            # Sort by relevance
-            filtered_hashtag_users.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
-            
-            # Combine unique users from both sources
-            all_usernames = {u["username"] for u in engaged_users}
-            
-            for user in filtered_hashtag_users:
-                if user["username"] not in all_usernames:
-                    engaged_users.append(user)
-                    all_usernames.add(user["username"])
-                    
-                    # If we have enough users, stop adding
-                    if len(engaged_users) >= limit:
-                        break
-            
-            print(f"Added {len(engaged_users) - len(seen_usernames)} additional users from hashtags")
-        
-        # If we have more than the limit, trim to the requested amount
-        followers = engaged_users[:limit]
-        
-        # If we found some engaged users, add them to the cache
-        if followers:
-            cache_data = {
-                "followers": followers,
-                "source": "filtered_comments_and_hashtags",
-                "quality_threshold": quality_threshold,
-                "cache_timestamp": datetime.now().isoformat()
-            }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(cache_data, f, indent=2)
-                
-            print(f"Collected total of {len(followers)} quality engaged users")
-            return followers
-        
-        # If we couldn't find users from comments or hashtags, check for previously cached users
-        print("No quality engaged users found. Checking for alternative data sources...")
-        
-        # Collect profile data to get info that might help us
-        profile_data = await collect_instagram_profile(instagram_handle)
-        
-        # If we have previously cached followers, maintain them
-        followers = []
-        if os.path.exists(cache_file):
-            with open(cache_file, 'r') as f:
-                cached_data = json.load(f)
-                if "followers" in cached_data and cached_data["followers"]:
-                    followers = cached_data["followers"]
-                    print(f"Maintaining {len(followers)} previously cached users")
-        
-        # Cache the results (even if empty)
-        cache_data = {
-            "followers": followers,
-            "profile_data": profile_data,
-            "cache_timestamp": datetime.now().isoformat(),
-            "source": "limited_data"
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(cache_data, f, indent=2)
-        
-        return followers
-    
-    except Exception as e:
-        print(f"Error collecting engaged users: {str(e)}")
-        # Return empty list instead of raising to allow process to continue
-        followers = []
-        cache_data = {
-            "followers": followers,
-            "cache_timestamp": datetime.now().isoformat(),
-            "error": str(e)
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(cache_data, f, indent=2)
-            
-        return followers
-
-async def analyze_follower_profile(username: str) -> Dict[str, Any]:
-    """
-    Analyze a single follower's profile to determine if they're a good candidate for ICP
-    """
-    print(f"Analyzing follower profile: @{username}")
-    
-    # Check cache first
-    cache_file = f"cache/{username}_profile.json"
-    if os.path.exists(cache_file):
-        with open(cache_file, 'r') as f:
-            cached_data = json.load(f)
-            # Check if cache is less than 1 day old
-            cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
-            if (datetime.now() - cache_time).days < 1:
-                print(f"Using cached profile data for @{username}")
-                return cached_data
-    
-    try:
-        # Apply rate limiting for profile API
-        await rate_limit("follower_profile", 2.5)
-        
-        # First check if profile is public
-        profile_run_input = {
-            "usernames": [username],
-            "resultsType": "details"
-        }
-        
-        profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input)
-        profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
-        
-        if not profile_items:
-            # Profile not found or inaccessible
-            result = {
-                "username": username, 
-                "is_private": True, 
-                "is_valid_icp": False, 
-                "reason": "Profile not found or inaccessible",
-                "cache_timestamp": datetime.now().isoformat(),
-                "error_type": "profile_not_found"
-            }
-            with open(cache_file, 'w') as f:
-                json.dump(result, f, indent=2)
-            return result
-        
-        profile_data = profile_items[0]
-        
-        # Check if profile is private
-        if profile_data.get("is_private", True):
-            profile_result = {
-                "username": username,
-                "is_private": True,
-                "is_valid_icp": False,
-                "reason": "Private profile",
-                "cache_timestamp": datetime.now().isoformat(),
-                "error_type": "private_profile"
-            }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(profile_result, f, indent=2)
-                
-            return profile_result
-            
-        # Apply rate limiting for posts API
-        await rate_limit("follower_posts", 2.5)
-        
-        # If profile is public, get their posts
-        posts_run_input = {
-            "usernames": [username],
-            "resultsType": "posts",
-            "resultsLimit": 10,
-            "addParentData": False
-        }
-        
-        posts_run = apify_client.actor("apify/instagram-scraper").call(run_input=posts_run_input)
-        posts = list(apify_client.dataset(posts_run["defaultDatasetId"]).iterate_items())
-        
-        # Check if they have enough posts
-        if len(posts) < 5:
-            profile_result = {
-                "username": username,
-                "is_private": False,
-                "posts_count": len(posts),
-                "is_valid_icp": False,
-                "reason": "Not enough posts (minimum 5)",
-                "profile_data": profile_data,
-                "cache_timestamp": datetime.now().isoformat(),
-                "error_type": "insufficient_posts"
-            }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(profile_result, f, indent=2)
-                
-            return profile_result
-        
-        # Filter out posts without captions or images
-        valid_posts = []
-        for post in posts:
-            if post.get("caption") or post.get("displayUrl"):
-                valid_posts.append(post)
-                
-        # Check if they have enough usable posts
-        if len(valid_posts) < 3:
-            profile_result = {
-                "username": username,
-                "is_private": False,
-                "posts_count": len(posts),
-                "valid_posts_count": len(valid_posts),
-                "is_valid_icp": False,
-                "reason": "Not enough posts with content (minimum 3)",
-                "profile_data": profile_data,
-                "cache_timestamp": datetime.now().isoformat(),
-                "error_type": "insufficient_valid_posts"
-            }
-            
-            with open(cache_file, 'w') as f:
-                json.dump(profile_result, f, indent=2)
-                
-            return profile_result
-        
-        # Profile has enough public content for analysis
-        profile_result = {
-            "username": username,
-            "is_private": False,
-            "posts_count": len(posts),
-            "valid_posts_count": len(valid_posts),
-            "is_valid_icp": True,
-            "profile_data": profile_data,
-            "posts": valid_posts[:10],  # Limit to 10 posts
-            "cache_timestamp": datetime.now().isoformat()
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(profile_result, f, indent=2)
-            
-        return profile_result
-    
-    except Exception as e:
-        print(f"Error analyzing follower profile @{username}: {str(e)}")
-        error_result = {
-            "username": username,
-            "is_valid_icp": False,
-            "error": str(e),
-            "reason": "Error analyzing profile",
-            "cache_timestamp": datetime.now().isoformat(),
-            "error_type": "api_error"
-        }
-        
-        with open(cache_file, 'w') as f:
-            json.dump(error_result, f, indent=2)
-            
-        return error_result
-
-# ==========================================
-# Analysis Functions
-# ==========================================
-
-def encode_image_to_base64(image_url: str) -> Optional[str]:
-    """
-    Download and encode image to base64 for Gemini Vision API
-    """
-    if not image_url:
-        return None
-        
-    max_retries = 3
-    retry_delay = 1
-    
-    for attempt in range(max_retries):
-        try:
-            response = requests.get(image_url, timeout=15)
-            response.raise_for_status()
-            
-            # Check if content is actually an image
-            content_type = response.headers.get('Content-Type', '')
-            if not content_type.startswith('image/'):
-                print(f"Warning: URL {image_url} returned non-image content type: {content_type}")
-                # Continue anyway, as Instagram sometimes has incorrect Content-Type headers
-            
-            # Verify it's an actual image by trying to open it
-            try:
-                img = Image.open(BytesIO(response.content))
-                img.verify()  # Verify it's an image
-                
-                # If image is too large, resize it to reduce payload size
-                img = Image.open(BytesIO(response.content))  # Need to reopen after verify
-                max_dimension = 1024
-                if img.width > max_dimension or img.height > max_dimension:
-                    # Calculate new dimensions while preserving aspect ratio
-                    if img.width > img.height:
-                        new_width = max_dimension
-                        new_height = int(img.height * (max_dimension / img.width))
-                    else:
-                        new_height = max_dimension
-                        new_width = int(img.width * (max_dimension / img.height))
-                    
-                    # Resize image
-                    img = img.resize((new_width, new_height), Image.LANCZOS)
-                    
-                    # Save to a new BytesIO object
-                    img_bytes = BytesIO()
-                    img.save(img_bytes, format=img.format or 'JPEG')
-                    img_bytes.seek(0)
-                    
-                    # Return base64 of resized image
-                    return base64.b64encode(img_bytes.read()).decode('utf-8')
-                
-                # If no resize needed, return original image
-                return base64.b64encode(response.content).decode('utf-8')
-                
-            except Exception as img_error:
-                print(f"Error verifying image from {image_url}: {str(img_error)}")
-                return None
-                
-        except requests.exceptions.RequestException as e:
-            print(f"Error downloading image from {image_url} (attempt {attempt+1}/{max_retries}): {str(e)}")
-            if attempt < max_retries - 1:
-                time.sleep(retry_delay)
-                # Increase delay for next retry
-                retry_delay *= 2
-            else:
-                return None
-    
-    return None
 
 async def analyze_brand_profile(profile_data: Dict[str, Any], posts: List[Dict[str, Any]]) -> Dict[str, Any]:
     """
@@ -1189,276 +401,387 @@ async def enhanced_audience_collection(instagram_handle: str, limit: int = 50, q
     # Return all users classified as real people, up to the increased limit
     return enhanced_users[:limit]
 
-async def collect_user_profile_posts(username: str, limit: int = 3) -> Dict[str, Any]:
+async def collect_users_from_hashtags(instagram_handle: str, limit: int = 30) -> List[Dict[str, Any]]:
     """
-    Simple helper function to collect a user's profile and a few posts
+    Collect users who post content with hashtags related to the brand.
+    This is another proxy for finding potential customers or brand followers.
+    Includes improved relevance filtering.
+    """
+    print(f"Collecting users from hashtags related to @{instagram_handle}")
     
-    Args:
-        username: Instagram username to collect data for
-        limit: Maximum number of posts to collect
-        
-    Returns:
-        Dictionary with user profile and posts data
-    """
     try:
-        print(f"Collecting profile data for @{username}")
+        # Get brand profile to extract potential brand-related terms
+        profile_data = await collect_instagram_profile(instagram_handle)
         
-        # Get profile data
-        profile_data = await collect_instagram_profile(username)
-        if not profile_data:
-            print(f"Could not retrieve profile data for @{username}")
-            return {}
+        # Extract the real brand name carefully - use the Instagram handle as fallback
+        brand_name = profile_data.get("fullName", instagram_handle)
+        if brand_name:
+            # Extract the first word to avoid getting extra words that might not be part of the core brand
+            brand_name_parts = brand_name.split()
+            core_brand = brand_name_parts[0].lower() if brand_name_parts else instagram_handle.lower()
+        else:
+            core_brand = instagram_handle.lower()
             
-        # Get posts (just a few)
-        posts = await collect_instagram_posts(username, limit=limit)
+        # Start with the most reliable hashtags - just the Instagram handle
+        hashtags_to_try = [instagram_handle.lower()]
         
-        # Combine into a user profile object
-        user_data = {
-            "username": username,
+        # Get category-specific hashtags based on the brand's bio
+        bio = profile_data.get("biography", "").lower()
+        
+        # Product-specific hashtags for different types of brands
+        if "plush" in bio or "toy" in bio or "stuffed" in bio or "squish" in bio or "soft" in bio:
+            # Plush toys or Squishable-like brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}plush", 
+                "plushies", 
+                "plushcollector", 
+                "plushtoys", 
+                "kawaiiplush",
+                "cuteplush",
+                "plushiesofinstagram"
+            ])
+        elif "shoe" in bio or "sneaker" in bio or "footwear" in bio:
+            # Footwear brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}shoes",
+                "shoelover",
+                "sneakerhead",
+                "footwear",
+                "shoeaddict"
+            ])
+        elif "glass" in bio or "eye" in bio or "spectacles" in bio or "frames" in bio:
+            # Eyewear brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}glasses",
+                "eyewear",
+                "glasses",
+                "eyeglasses",
+                "frames"
+            ])
+        elif "beauty" in bio or "makeup" in bio or "skincare" in bio:
+            # Beauty brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}beauty",
+                "beautyproducts",
+                "skincare",
+                "makeupaddicts",
+                "beautylovers"
+            ])
+        elif "coffee" in bio or "cafe" in bio or "tea" in bio:
+            # Coffee or cafe brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}coffee",
+                "coffeelover",
+                "coffeeaddict",
+                "cafelife",
+                "coffeeculture"
+            ])
+        else:
+            # General brand hashtags
+            hashtags_to_try.extend([
+                f"{instagram_handle}fan",
+                f"love{instagram_handle}",
+                f"{instagram_handle}products"
+            ])
+        
+        # Get additional terms from bio that might be branded hashtags
+        bio_hashtags = []
+        for word in bio.split():
+            if word.startswith('#'):
+                tag = word[1:].lower()
+                # Make sure it's reasonably sized and unique
+                if len(tag) > 3:
+                    bio_hashtags.append(tag)
+        
+        # Add verified bio hashtags to our list
+        hashtags_to_try.extend(bio_hashtags)
+        
+        # Remove duplicates while preserving order
+        seen = set()
+        hashtags_to_try = [h for h in hashtags_to_try if not (h in seen or seen.add(h))]
+        
+        # Get posts from each hashtag
+        all_users = []
+        checked_hashtags = set()
+        
+        for hashtag in hashtags_to_try:
+            if len(hashtag) < 3:
+                continue  # Skip very short hashtags
+                
+            # Skip if we've already checked this hashtag
+            if hashtag in checked_hashtags:
+                continue
+                
+            checked_hashtags.add(hashtag)
+                
+            # Check relevance first using our improved filter
+            if hashtag != instagram_handle.lower() and not hashtag.startswith(instagram_handle.lower()):
+                # Keep stricter relevance check for non-exact matches
+                relevance = await filter_hashtag_relevance(instagram_handle, hashtag)
+                if relevance < 0.3 and not hashtag in bio_hashtags:
+                    print(f"Skipping low-relevance hashtag #{hashtag} (score: {relevance:.1f})")
+                    continue
+            else:
+                # Direct match gets top relevance
+                relevance = 0.9
+            
+            try:
+                # Get hashtag posts
+                hashtag_data = await collect_hashtag_posts(hashtag, limit=50)
+                
+                # Extract usernames from posts with their source hashtag
+                for item in hashtag_data:
+                    if "latestPosts" in item and isinstance(item["latestPosts"], list):
+                        for post in item["latestPosts"]:
+                            if "ownerUsername" in post and post["ownerUsername"] != instagram_handle:
+                                # Check if this post specifically mentions the brand
+                                caption = post.get("caption", "").lower()
+                                mentions_brand = any(term in caption for term in [instagram_handle.lower(), brand_name])
+                                
+                                # Include source hashtag for later relevance filtering
+                                all_users.append({
+                                    "username": post["ownerUsername"],
+                                    "source": "hashtag",
+                                    "source_hashtag": hashtag,
+                                    "relevance_score": relevance + (0.2 if mentions_brand else 0),
+                                    "mentions_brand": mentions_brand
+                                })
+                    elif "ownerUsername" in item and item["ownerUsername"] != instagram_handle:
+                        all_users.append({
+                            "username": item["ownerUsername"],
+                            "source": "hashtag",
+                            "source_hashtag": hashtag,
+                            "relevance_score": relevance
+                        })
+                
+                # If we have enough users, we can stop searching more hashtags
+                if len(all_users) >= limit * 2:  # Get extra for filtering
+                    break
+                    
+            except Exception as e:
+                print(f"Error searching hashtag #{hashtag}: {str(e)}")
+                continue
+        
+        # Remove duplicates by username with a preference for higher relevance
+        unique_users = {}
+        for user in all_users:
+            username = user["username"]
+            if username not in unique_users or user.get("relevance_score", 0) > unique_users[username].get("relevance_score", 0):
+                unique_users[username] = user
+        
+        # Convert back to list and sort by relevance score
+        result_users = list(unique_users.values())
+        result_users.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+        
+        # Return top users by relevance
+        return result_users[:limit]
+        
+    except Exception as e:
+        print(f"Error collecting users from hashtags: {str(e)}")
+        return []
+
+async def collect_instagram_followers(instagram_handle: str, limit: int = 50, quality_threshold: int = 60) -> List[Dict[str, Any]]:
+    """
+    Collect a sample of users engaged with a brand's Instagram profile.
+    Since direct follower scraping is limited, we use comments on posts as a proxy,
+    with hashtag analysis as a secondary method. Includes comment quality filtering.
+    """
+    print(f"Collecting engaged users for @{instagram_handle} (quality threshold: {quality_threshold})")
+    
+    # Check cache first
+    cache_file = f"cache/{instagram_handle}_followers.json"
+    if os.path.exists(cache_file):
+        with open(cache_file, 'r') as f:
+            cached_data = json.load(f)
+            # Check if cache is less than 1 day old
+            cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
+            if (datetime.now() - cache_time).days < 1:
+                print(f"Using cached user data for @{instagram_handle}")
+                if cached_data.get("followers", []):
+                    return cached_data["followers"]
+    
+    try:
+        # First, get posts from the brand
+        posts = await collect_instagram_posts(instagram_handle, limit=10)
+        if not posts:
+            print(f"No posts found for @{instagram_handle}")
+            return []
+        
+        print(f"Found {len(posts)} posts, collecting comments...")
+        
+        # Collect all comments from posts
+        all_comments = []
+        
+        for post in posts:
+            if "shortCode" not in post:
+                continue
+                
+            post_id = post.get("shortCode")
+            
+            # Get comments for this post
+            comments = await collect_post_comments(post_id, limit=50)
+            all_comments.extend(comments)
+                
+            # If we have enough comments, we can stop collecting more posts
+            if len(all_comments) >= limit * 3:  # Collect more than needed for filtering
+                break
+        
+        print(f"Analyzing quality of {len(all_comments)} comments...")
+        
+        # Analyze and filter comments
+        analyzed_comments = []
+        for comment in all_comments:
+            # Skip brand's own comments
+            if comment.get("ownerUsername") == instagram_handle:
+                continue
+                
+            # Analyze comment quality
+            analyzed_comment = await analyze_comment_quality(comment)
+            analyzed_comments.append(analyzed_comment)
+        
+        # Filter for high-quality comments
+        # Prioritize:
+        # 1. Non-bot comments
+        # 2. Positive or neutral sentiment
+        # 3. Higher quality scores that meet our threshold
+        quality_comments = [c for c in analyzed_comments 
+                           if not c.get("is_likely_bot", True) 
+                           and c.get("quality_score", 0) >= quality_threshold]
+        
+        # Sort by quality score (highest first)
+        quality_comments.sort(key=lambda x: x.get("quality_score", 0), reverse=True)
+        
+        print(f"Found {len(quality_comments)} comments above quality threshold ({quality_threshold})")
+        
+        # Extract unique usernames from quality comments
+        engaged_users = []
+        seen_usernames = set()
+        
+        for comment in quality_comments:
+            username = comment.get("ownerUsername")
+            if username and username not in seen_usernames:
+                seen_usernames.add(username)
+                engaged_users.append({
+                    "username": username,
+                    "source": "comment",
+                    "sentiment": comment.get("sentiment", "neutral"),
+                    "quality_score": comment.get("quality_score", 0),
+                })
+        
+        # If we don't have enough users from comments, try hashtag analysis
+        if len(engaged_users) < limit:
+            print(f"Only found {len(engaged_users)} quality users from comments, trying hashtag analysis...")
+            
+            # Get hashtag-based users with relevance filtering
+            hashtag_followers = await collect_users_from_hashtags(instagram_handle, limit=limit*2)  # Get more for filtering
+            
+            # Filter hashtag users by added relevance criterion 
+            filtered_hashtag_users = []
+            
+            for user in hashtag_followers:
+                # If the user was found from hashtags, check for source hashtag relevance
+                source_hashtag = user.get("source_hashtag", "")
+                if source_hashtag:
+                    relevance = await filter_hashtag_relevance(instagram_handle, source_hashtag)
+                    if relevance >= 0.4:  # Only keep medium-high relevance
+                        user["relevance_score"] = relevance
+                        filtered_hashtag_users.append(user)
+                else:
+                    # If no specific source_hashtag, keep with lower priority
+                    user["relevance_score"] = 0.3
+                    filtered_hashtag_users.append(user)
+            
+            # Sort by relevance
+            filtered_hashtag_users.sort(key=lambda x: x.get("relevance_score", 0), reverse=True)
+            
+            # Combine unique users from both sources
+            all_usernames = {u["username"] for u in engaged_users}
+            
+            for user in filtered_hashtag_users:
+                if user["username"] not in all_usernames:
+                    engaged_users.append(user)
+                    all_usernames.add(user["username"])
+                    
+                    # If we have enough users, stop adding
+                    if len(engaged_users) >= limit:
+                        break
+            
+            print(f"Added {len(engaged_users) - len(seen_usernames)} additional users from hashtags")
+        
+        # If we have more than the limit, trim to the requested amount
+        followers = engaged_users[:limit]
+        
+        # If we found some engaged users, add them to the cache
+        if followers:
+            cache_data = {
+                "followers": followers,
+                "source": "filtered_comments_and_hashtags",
+                "quality_threshold": quality_threshold,
+                "cache_timestamp": datetime.now().isoformat()
+            }
+            
+            with open(cache_file, 'w') as f:
+                json.dump(cache_data, f, indent=2)
+                
+            print(f"Collected total of {len(followers)} quality engaged users")
+            return followers
+        
+        # If we couldn't find users from comments or hashtags, check for previously cached users
+        print("No quality engaged users found. Checking for alternative data sources...")
+        
+        # Collect profile data to get info that might help us
+        profile_data = await collect_instagram_profile(instagram_handle)
+        
+        # If we have previously cached followers, maintain them
+        followers = []
+        if os.path.exists(cache_file):
+            with open(cache_file, 'r') as f:
+                cached_data = json.load(f)
+                if "followers" in cached_data and cached_data["followers"]:
+                    followers = cached_data["followers"]
+                    print(f"Maintaining {len(followers)} previously cached users")
+        
+        # Cache the results (even if empty)
+        cache_data = {
+            "followers": followers,
             "profile_data": profile_data,
-            "posts": posts
+            "cache_timestamp": datetime.now().isoformat(),
+            "source": "limited_data"
         }
         
-        return user_data
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f, indent=2)
+        
+        return followers
     
     except Exception as e:
-        print(f"Error collecting user data for @{username}: {str(e)}")
-        return {
-            "username": username,
+        print(f"Error collecting engaged users: {str(e)}")
+        # Return empty list instead of raising to allow process to continue
+        followers = []
+        cache_data = {
+            "followers": followers,
+            "cache_timestamp": datetime.now().isoformat(),
             "error": str(e)
         }
+        
+        with open(cache_file, 'w') as f:
+            json.dump(cache_data, f, indent=2)
+            
+        return followers
 
-async def get_gemini_json_response(model: str, prompts: List[str], retries: int = 3) -> Dict[str, Any]:
+async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30) -> Dict[str, Any]:
     """
-    Make a structured request to Gemini API and return JSON response
-    
-    Args:
-        model: Gemini model to use ('gemini-1.5-pro' or 'gemini-1.5-flash')
-        prompts: List of text prompts to send
-        retries: Number of retries on failure
-        
-    Returns:
-        Parsed JSON response from Gemini
-    """
-    print(f"Making Gemini API call with model {model}...")
-    
-    # Apply rate limiting
-    await rate_limit("gemini_api", 2.0)
-    
-    attempt = 0
-    last_error = None
-    
-    while attempt < retries:
-        try:
-            # Create the model
-            genai_model = genai.GenerativeModel(model)
-            
-            # Make the request
-            response = genai_model.generate_content(prompts)
-            
-            # Extract the text response
-            text_response = response.text
-            
-            # Check if response starts/ends with triple backticks for code blocks
-            if text_response.startswith("```json") and "```" in text_response:
-                # Extract just the JSON part
-                json_text = text_response.split("```json")[1].split("```")[0].strip()
-            elif text_response.startswith("```") and text_response.endswith("```"):
-                json_text = text_response[3:-3].strip()
-            else:
-                json_text = text_response
-            
-            # Parse the JSON
-            try:
-                result = json.loads(json_text)
-                return result
-            except json.JSONDecodeError as e:
-                print(f"Error decoding JSON: {e}")
-                print(f"Raw response: {text_response}")
-                
-                # Try to extract anything that looks like JSON with curly braces
-                import re
-                json_match = re.search(r'({.*})', text_response, re.DOTALL)
-                if json_match:
-                    try:
-                        result = json.loads(json_match.group(1))
-                        return result
-                    except:
-                        pass
-                
-                # More aggressive cleanup attempt - remove any non-JSON text before/after curly braces
-                try:
-                    # Find the first opening brace and last closing brace
-                    start_idx = text_response.find('{')
-                    end_idx = text_response.rfind('}')
-                    
-                    if start_idx >= 0 and end_idx > start_idx:
-                        json_text = text_response[start_idx:end_idx+1]
-                        result = json.loads(json_text)
-                        return result
-                except:
-                    pass
-                
-                raise Exception(f"Could not parse JSON from response: {e}")
-                
-        except Exception as e:
-            last_error = str(e)
-            attempt += 1
-            await asyncio.sleep(2)  # Wait before retrying
-            print(f"Retrying Gemini API call ({attempt}/{retries}): {last_error}")
-    
-    # If we reach here, all retries failed
-    print(f"All Gemini API attempts failed: {last_error}")
-    return {"error": last_error}
-
-async def analyze_comments_for_icp(comments: List[Dict[str, Any]], brand_handle: str, brand_name: str) -> List[Dict[str, Any]]:
-    """
-    Analyze comments to identify potential ICPs based on their engagement
-    
-    Args:
-        comments: List of comments with quality analysis
-        brand_handle: Instagram handle of the brand
-        brand_name: Name of the brand
-        
-    Returns:
-        List of potential ICP users with quality ratings
-    """
-    if not comments:
-        return []
-        
-    print(f"Analyzing {len(comments)} comments to identify potential ICPs...")
-    
-    # Filter out very low-quality comments - more inclusive threshold
-    quality_comments = [c for c in comments if c.get("quality_score", 0) >= 20]
-    
-    icp_candidates = {}
-    
-    # Normalize brand name for pattern matching
-    brand_name_lower = brand_name.lower()
-    brand_handle_lower = brand_handle.lower()
-    
-    # Evaluate each comment for ICP potential
-    for comment in quality_comments:
-        username = comment.get("ownerUsername")
-        if not username:
-            continue
-            
-        text = comment.get("text", "")
-        sentiment = comment.get("sentiment", "neutral")
-        
-        # Skip if this user is already processed
-        if username in icp_candidates:
-            # Update existing record with better scoring if available
-            if comment.get("quality_score", 0) > icp_candidates[username].get("quality_score", 0):
-                icp_candidates[username]["quality_score"] = comment.get("quality_score", 0)
-                icp_candidates[username]["comment_text"] = text
-            
-            # Count the comments from this user
-            icp_candidates[username]["comment_count"] += 1
-            
-            # Accumulate ICP signals across multiple comments
-            icp_candidates[username]["icp_signals"] += 1
-            continue
-            
-        # Check for ICP signals in the comment text
-        icp_signals = 0
-        
-        # Personal experience with product - expanded patterns
-        if any(phrase in text.lower() for phrase in [
-            "i have", "i bought", "i love", "i use", "i wear", "i own", "i got",
-            "my pair", "my new", "mine", "i'm wearing", "i am wearing", "i ordered",
-            "i received", "i purchased", "just got", "arrived today", "delivered",
-            "i tried", "wearing my", "using my", "bought these", "got these"
-        ]):
-            icp_signals += 2
-            
-        # Product knowledge - expanded patterns
-        if any(phrase in text.lower() for phrase in [
-            "quality", "comfort", "fit", "design", "material", "feature", "technology",
-            "waterproof", "breathable", "durable", "lightweight", "performance",
-            "sizing", "color", "cushioning", "support", "style", "laces", "sole",
-            "fabric", "stitching", "color way", "colorway", "release", "drop",
-            "limited edition", "exclusive", "collaboration", "collab", "authentic"
-        ]):
-            icp_signals += 1
-            
-        # Brand loyalty - expanded patterns
-        if any(phrase in text.lower() for phrase in [
-            "favorite brand", "best brand", "loyal", "always buy", "never disappoint", 
-            "never fails", "consistently", "collection", "fan", "love the brand",
-            "always choose", "go-to", "go to", "only wear", "always wear", "trust",
-            "reliable", "never lets me down", "been wearing for years", "since day one"
-        ]):
-            icp_signals += 2
-            
-        # Emotional connection - expanded patterns
-        if any(word in text.lower() for word in [
-            "amazing", "awesome", "incredible", "perfect", "love", "beautiful", "excellent",
-            "outstanding", "extraordinary", "impressive", "exceptional", "fantastic",
-            "great", "stunning", "wonderful", "stylish", "cool", "dope", "fire", "lit",
-            "obsessed", "addicted", "can't get enough", "need more", "best", "favorite"
-        ]):
-            icp_signals += 1
-            
-        # Question about product/brand (engagement) - expanded patterns
-        if "?" in text and any(word in text.lower() for word in [
-            "available", "release", "when", "where", "how", "which", "recommend", "sizing", "price",
-            "restock", "coming out", "sell", "shipping", "delivery", "store", "shop", "online",
-            "website", "app", "discount", "sale", "upcoming", "next", "color", "size", "fit"
-        ]):
-            icp_signals += 1
-            
-        # Direct mention of the brand - new pattern
-        if brand_name_lower in text.lower() or brand_handle_lower in text.lower():
-            icp_signals += 1
-            
-        # High engagement - leaving detailed comment
-        if len(text) > 100:
-            icp_signals += 1
-        
-        # Any comment engagement is worth something - more inclusive
-        if icp_signals == 0 and len(text) > 10:
-            icp_signals = 0.5
-            
-        # Create ICP candidate record with more inclusive thresholds
-        icp_quality = "low"
-        if icp_signals >= 3:
-            icp_quality = "high"
-        elif icp_signals >= 1:
-            icp_quality = "medium"
-            
-        icp_candidates[username] = {
-            "username": username,
-            "icp_quality": icp_quality,
-            "icp_signals": icp_signals,
-            "quality_score": comment.get("quality_score", 0),
-            "sentiment": sentiment,
-            "comment_text": text,
-            "comment_count": 1
-        }
-    
-    # Convert to list and sort by quality
-    result = list(icp_candidates.values())
-    result.sort(key=lambda x: (x.get("icp_signals", 0), x.get("quality_score", 0)), reverse=True)
-    
-    # Return all candidates - more inclusive
-    return result
-
-async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_ai_filtering: bool = True) -> Dict[str, Any]:
-    """
-    Process a single brand through the entire analysis pipeline with LLM-enhanced approach
+    Process a single brand through the analysis pipeline
     
     Args:
         brand: The brand data dictionary
         quality_threshold: Minimum quality score (0-100) for comments
-        use_ai_filtering: Whether to use AI-based username filtering
     """
     name = brand.get("name", "Unknown")
     url = brand.get("url", "")
     instagram_handle = brand.get("instagram_handle", "")
     
     print(f"\n=== Processing Brand: {name} (@{instagram_handle}) ===\n")
-    print(f"Using LLM-enhanced approach for deeper insights")
     
     try:
         # 1. Collect brand's Instagram profile data
@@ -1476,387 +799,36 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
         brand_analysis = await analyze_brand_profile_with_llm(profile_data, posts)
         print("✓ Successfully analyzed brand profile")
         
-        # 4. Collect engaged users with rule-based filtering
-        print("Step 4/5: Collecting and analyzing audience data...")
-        
-        # 4a. Get users from comments and analyze comment quality
-        print("  - Collecting comments from recent posts...")
-        all_comments = []
-        
-        for post in posts:
-            if "shortCode" not in post:
-                continue
-                
-            post_id = post.get("shortCode")
-            
-            # Apply rate limiting
-            await rate_limit("instagram_comments", 3.0)
-            
-            # Get comments for this post
-            try:
-                run_input = {
-                    "directUrls": [f"https://www.instagram.com/p/{post_id}/"],
-                    "resultsLimit": 100  # Increased from 50 to get more comments
-                }
-                
-                run = apify_client.actor("apify/instagram-comment-scraper").call(run_input=run_input, timeout_secs=60)
-                comments = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
-                
-                # Analyze comment quality
-                for comment in comments:
-                    # Skip brand's own comments
-                    if comment.get("ownerUsername") == instagram_handle:
-                        continue
-                    
-                    analyzed_comment = await analyze_comment_quality(comment)
-                    all_comments.append(analyzed_comment)
-                
-            except Exception as e:
-                print(f"  - Error collecting comments for post {post_id}: {str(e)}")
-                continue
-        
-        print(f"  - Collected and analyzed {len(all_comments)} comments")
-        
-        # 4b. Identify ICPs from comments - use a lower quality threshold
-        comment_quality_threshold = max(10, quality_threshold - 15)  # Lower threshold to cast wider net
-        filtered_comments = [c for c in all_comments if c.get("quality_score", 0) >= comment_quality_threshold]
-        comment_icp_candidates = await analyze_comments_for_icp(filtered_comments, instagram_handle, name)
-        print(f"  - Identified {len(comment_icp_candidates)} potential ICPs from comments")
-        
-        # 4c. Use rules-based username filtering as a secondary method - increased limit
+        # 4. Collect users with enhanced audience collection
+        print("Step 4/5: Collecting audience data...")
         engaged_users = await enhanced_audience_collection(instagram_handle, limit=30, quality_threshold=quality_threshold)
+        print(f"✓ Successfully collected {len(engaged_users)} engaged users")
         
-        if engaged_users:
-            print(f"  - Found {len(engaged_users)} users through username filtering")
-        else:
-            print("  - No engaged users found through username filtering")
-            engaged_users = []
-        
-        # 4d. Combine the two sets of users, prioritizing comment-based ICPs
-        combined_users = []
-        seen_usernames = set()
-        
-        # Add comment-based ICPs first (they're higher quality)
-        for user in comment_icp_candidates:
-            username = user.get("username")
-            if username:
-                seen_usernames.add(username)
-                combined_users.append({
-                    "username": username,
-                    "source": "comment",
-                    "icp_quality": user.get("icp_quality", "low"),
-                    "comment_text": user.get("comment_text", ""),
-                    "comment_count": user.get("comment_count", 1),
-                    "quality_score": user.get("quality_score", 0)
-                })
-        
-        # Add username-filtered users that haven't been added yet
-        for user in engaged_users:
-            username = user.get("username")
-            if username and username not in seen_usernames:
-                seen_usernames.add(username)
-                combined_users.append(user)
-        
-        print(f"  - Combined total of {len(combined_users)} unique engaged users")
-        
-        # 5. Analyze users for ICP data with LLM, but first check if they're public profiles
-        print("Step 5/5: Performing deep ICP analysis with LLM...")
+        # 5. Analyze a subset of users for ICP
+        print("Step 5/5: Analyzing users for ICP data...")
         icp_data = []
-        icp_limit = 30  # Increased from 15 to 30 to have more candidates for public profiles
-        min_public_profiles = 3  # Minimum number of public profiles we want to analyze
         
-        # Function to process a batch of users
-        async def process_user_batch(users_batch):
-            public_users = []
-            private_users = []
-            
-            # Quick check for public vs private profiles in parallel
-            async def check_profile_visibility(user):
-                username = user.get("username")
-                try:
-                    # Use the profile scraper with extended output function to properly get the is_private field
-                    profile_run_input = {
-                        "usernames": [username],
-                        "resultsType": "details",
-                        "extendOutputFunction": """
-                            ($) => {
-                                return {
-                                    username: $.username,
-                                    fullName: $.full_name,
-                                    biography: $.biography,
-                                    followersCount: $.edge_followed_by?.count,
-                                    followingCount: $.edge_follow?.count,
-                                    postsCount: $.edge_owner_to_timeline_media?.count,
-                                    profilePicUrl: $.profile_pic_url_hd,
-                                    is_private: $.is_private,
-                                    isBusinessAccount: $.is_business_account,
-                                    businessCategory: $.business_category_name
-                                }
-                            }
-                        """
-                    }
-                    
-                    await rate_limit("profile_check", 1.0)
-                    
-                    profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input, timeout_secs=60)
-                    profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
-                    
-                    if not profile_items:
-                        # Try one more time with a basic call
-                        await rate_limit("profile_check", 1.0)
-                        simple_run_input = {"usernames": [username]}
-                        profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=simple_run_input, timeout_secs=60)
-                        profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
-                        
-                        if not profile_items:
-                            return {"user": user, "public": False, "exists": False}
-                    
-                    # Instagram marks business profiles differently, so we consider both
-                    is_private = profile_items[0].get("is_private", True)
-                    is_business = profile_items[0].get("isBusinessAccount", False)
-                    
-                    # Business accounts should be considered public even if private flag is set
-                    is_really_public = not is_private or is_business
-                    
-                    # Also check posts count - if there are posts and it's not marked private, it's likely public
-                    posts_count = profile_items[0].get("postsCount", 0)
-                    if posts_count > 0 and not is_private:
-                        is_really_public = True
-                    
-                    return {
-                        "user": user, 
-                        "public": is_really_public, 
-                        "exists": True, 
-                        "profile_data": profile_items[0],
-                        "is_business": is_business
-                    }
-                except Exception as e:
-                    print(f"Error checking profile visibility for @{username}: {str(e)}")
-                    # Default to public so we can try to analyze it anyway
-                    return {"user": user, "public": True, "exists": True}
-            
-            # Check all profiles in parallel with a semaphore to limit concurrency
-            async def check_all_profiles():
-                sem = asyncio.Semaphore(3)  # Limit to 3 concurrent API calls
-                
-                async def check_with_semaphore(user):
-                    async with sem:
-                        return await check_profile_visibility(user)
-                
-                tasks = [check_with_semaphore(user) for user in users_batch]
-                return await asyncio.gather(*tasks)
-            
-            print(f"  - Pre-filtering batch of {len(users_batch)} profiles...")
-            profile_checks = await check_all_profiles()
-            
-            for result in profile_checks:
-                if result["public"]:
-                    public_users.append(result["user"])
-                else:
-                    if result["exists"]:
-                        private_users.append({
-                            "user": result["user"],
-                            "profile_data": result.get("profile_data", {})
-                        })
-                        print(f"  - Skipping private profile: @{result['user'].get('username')}")
-                    else:
-                        print(f"  - Skipping non-existent profile: @{result['user'].get('username')}")
-            
-            return public_users, private_users
-        
-        # Prioritize comment-based users first
-        users_to_analyze = combined_users[:icp_limit]
-        
-        # Process initial batch of users
-        print("  - Pre-filtering for public profiles...")
-        public_users, private_users = await process_user_batch(users_to_analyze)
-        
-        # If we don't have enough public profiles, try to get more
-        remaining_attempts = 2  # Number of additional attempts to find public profiles
-        remaining_users = combined_users[icp_limit:]  # Users we haven't tried yet
-        
-        while len(public_users) < min_public_profiles and remaining_attempts > 0 and remaining_users:
-            print(f"  - Only found {len(public_users)} public profiles, attempting to find more...")
-            
-            # Get the next batch of users
-            batch_size = min(20, len(remaining_users))  # Process up to 20 more users
-            next_batch = remaining_users[:batch_size]
-            remaining_users = remaining_users[batch_size:]
-            
-            # Process this batch
-            more_public, more_private = await process_user_batch(next_batch)
-            
-            # Add to our existing lists
-            public_users.extend(more_public)
-            private_users.extend(more_private)
-            remaining_attempts -= 1
-        
-        # If still not enough, try collecting more users with a lower threshold
-        if len(public_users) < min_public_profiles and remaining_attempts > 0:
-            print(f"  - Still only found {len(public_users)} public profiles, collecting more users with lower threshold...")
-            
-            # Get more users with a lower threshold
-            lower_threshold = max(5, quality_threshold - 15)  # Even lower threshold
-            more_users = await enhanced_audience_collection(instagram_handle, limit=30, quality_threshold=lower_threshold)
-            
-            # Filter out usernames we've already checked
-            checked_usernames = {user.get("username") for user in users_to_analyze + (remaining_users or [])}
-            new_users = [user for user in more_users if user.get("username") not in checked_usernames]
-            
-            if new_users:
-                print(f"  - Found {len(new_users)} additional users to check...")
-                more_public, more_private = await process_user_batch(new_users)
-                public_users.extend(more_public)
-                private_users.extend(more_private)
-        
-        print(f"  - Found {len(public_users)} public profiles to analyze")
-        
-        # If we have public profiles, analyze them in detail
-        if public_users:
-            for i, user in enumerate(public_users):
-                username = user.get("username")
-                if not username:
-                    continue
-                    
-                # Show source for better insights
-                source_info = ""
-                if user.get("source") == "comment":
-                    source_info = f" (comment-based, quality: {user.get('icp_quality', 'unknown')})"
-                
-                print(f"Analyzing potential ICP: @{username}{source_info}...")
-                
-                # Get user profile data
-                user_profile = await collect_user_profile_posts(username, limit=3)
-                
-                # Add the comment text if available (helps with analysis)
-                if user.get("comment_text"):
-                    if "comments" not in user_profile:
-                        user_profile["comments"] = []
-                    user_profile["comments"].append({
-                        "text": user.get("comment_text", ""),
-                        "count": user.get("comment_count", 1)
-                    })
-                
-                # LLM-based ICP analysis
-                if user_profile:
-                    analyzed_user = await analyze_user_profile_with_llm(user_profile, instagram_handle, name)
-                    icp_data.append(analyzed_user)
-        
-        # Analyze private profiles with limited data-based analysis
-        print(f"  - Analyzing {len(private_users)} private profiles with limited data...")
-        
-        for item in private_users:
-            user = item["user"]
+        # Analyze up to 5 users in detail with LLM
+        for i, user in enumerate(engaged_users[:5]):
             username = user.get("username")
             if not username:
                 continue
-            
-            # Basic inferred data from username and comments
-            is_comment_user = user.get("source") == "comment"
-            comment_text = user.get("comment_text", "")
-            comment_count = user.get("comment_count", 0)
-            
-            # Get interests based on comment text if available
-            inferred_interests = []
-            engagement_potential = "low"
-            
-            # Enhanced visibility using available data
-            if is_comment_user and comment_text:
-                # Check for product interest signals
-                if any(keyword in comment_text.lower() for keyword in [
-                    "shoes", "sneakers", "running", "training", "workout", "sport", 
-                    "apparel", "jersey", "jacket", "fit", "performance"
-                ]):
-                    inferred_interests.append("Athletic footwear")
-                    inferred_interests.append("Sports apparel")
-                    engagement_potential = "medium"
                 
-                # Check for brand interest
-                if "nike" in comment_text.lower() or any(word in comment_text.lower() for word in ["jordans", "air max", "airmax"]):
-                    inferred_interests.append("Nike products")
-                    engagement_potential = "medium"
-                    
-                # Check for fashion interest
-                if any(keyword in comment_text.lower() for keyword in [
-                    "style", "fashion", "look", "design", "cool", "love", "want", "need"
-                ]):
-                    inferred_interests.append("Fashion")
-                    inferred_interests.append("Streetwear")
-                    
-                # High engagement potential if multiple comments or detailed feedback
-                if comment_count > 1 or len(comment_text) > 100:
-                    engagement_potential = "high"
+            print(f"Analyzing potential ICP: @{username}...")
             
-            # Try to infer interest from username patterns
-            username_lower = username.lower()
-            if any(keyword in username_lower for keyword in [
-                "run", "fitness", "fit", "gym", "sport", "athlete", "coach", "train"
-            ]):
-                inferred_interests.append("Fitness")
-                inferred_interests.append("Sports")
-                engagement_potential = "medium"
-                
-            # Create a minimal profile with available data
-            full_name = item.get("profile_data", {}).get("full_name", "Unknown")
-            follower_count = item.get("profile_data", {}).get("followersCount", 0)
+            # Get user profile data
+            user_profile = await collect_user_profile_posts(username, limit=3)
             
-            # Set up reasoning based on available data
-            if is_comment_user:
-                reasoning = f"Limited analysis based on comment engagement. User has commented: '{comment_text[:100]}...'"
-                if comment_count > 1:
-                    reasoning += f" User has made {comment_count} comments on brand posts."
-            else:
-                reasoning = "Limited analysis based on username patterns only. Profile is private."
-                
-            # Make an inference on ICP suitability
-            is_suitable = engagement_potential != "low" or len(inferred_interests) > 0
-                
-            minimal_profile = {
-                "username": username,
-                "profile_data": {
-                    "username": username,
-                    "full_name": full_name,
-                    "bio": "Private profile",
-                    "follower_count": follower_count
-                },
-                "icp_analysis": {
-                    "is_suitable_icp": is_suitable,
-                    "reasoning": reasoning,
-                    "profile_summary": f"Private Instagram profile for @{username}",
-                    "interests": inferred_interests if inferred_interests else ["Unknown due to private profile"],
-                    "demographic_indicators": [],
-                    "brand_affinities": ["Nike"] if "nike" in comment_text.lower() else [],
-                    "engagement_potential": engagement_potential
-                },
-                "is_private": True,
-                "posts_count": 0,
-                "comments_count": comment_count
-            }
-            
-            # Add to ICP data
-            icp_data.append(minimal_profile)
-        
-        # If we don't have any ICP data from either public or private profiles, add minimal placeholder
-        if not icp_data:
-            print("  - No usable profile data found. Adding minimal placeholder for analysis.")
-            icp_data.append({
-                "username": "placeholder_user",
-                "profile_data": {"username": "placeholder_user", "full_name": "Unknown", "bio": "No data available"},
-                "icp_analysis": {
-                    "is_suitable_icp": False,
-                    "reasoning": "No usable profile data could be found for analysis.",
-                    "profile_summary": "Placeholder for missing data",
-                    "interests": ["Unknown"],
-                    "demographic_indicators": [],
-                    "brand_affinities": [],
-                    "engagement_potential": "unknown"
-                }
-            })
+            # LLM-based ICP analysis
+            if user_profile:
+                analyzed_user = await analyze_user_profile_with_llm(user_profile, instagram_handle, name)
+                icp_data.append(analyzed_user)
         
         # Generate audience insights with LLM
+        print("Generating audience insights...")
         audience_insights = await generate_audience_insights_with_llm(icp_data, name, instagram_handle)
         
-        # Complete results with all our data
+        # Prepare results
         results = {
             "brand": {
                 "name": name,
@@ -1867,34 +839,21 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
             "brand_analysis": brand_analysis,
             "posts_sample": posts[:3],  # Include 3 sample posts
             "audience_data": {
-                "engaged_users": [{"username": u.get("username")} for u in combined_users],
+                "engaged_users": [{"username": u.get("username")} for u in engaged_users],
                 "icp_data": icp_data,
-                "comment_based_users": len(comment_icp_candidates),
-                "username_based_users": len(engaged_users),
-                "total_unique_users": len(combined_users),
-                "public_profiles": len(public_users),
-                "private_profiles": len(private_users)
+                "total_unique_users": len(engaged_users)
             },
             "audience_insights": audience_insights,
             "analysis_metadata": {
                 "timestamp": datetime.now().isoformat(),
                 "analysis_type": "llm_enhanced_approach",
                 "quality_threshold_used": quality_threshold,
-                "status": "completed",
-                "api_usage": "Active - Using Gemini API"
+                "status": "completed"
             }
         }
         
         # Save results to disk
-        os.makedirs("results", exist_ok=True)
-        
-        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
-        result_file = f"results/{instagram_handle}_{timestamp}.json"
-        
-        with open(result_file, 'w') as f:
-            json.dump(results, f, indent=2)
-            
-        print(f"\nAnalysis complete! Results saved to {result_file}")
+        save_results(instagram_handle, results)
         
         return results
         
@@ -1919,8 +878,6 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
         }
         
         # Save error results to disk
-        os.makedirs("results", exist_ok=True)
-        
         timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
         result_file = f"results/{instagram_handle}_{timestamp}_error.json"
         
@@ -2290,12 +1247,15 @@ async def generate_audience_insights_with_llm(icp_data: List[Dict[str, Any]], br
 
 def save_results(instagram_handle: str, results: Dict[str, Any]):
     """Save results to JSON file"""
-    filename = f"results/{instagram_handle}_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
+    os.makedirs("results", exist_ok=True)
     
-    with open(filename, 'w') as f:
+    timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+    result_file = f"results/{instagram_handle}_{timestamp}.json"
+    
+    with open(result_file, 'w') as f:
         json.dump(results, f, indent=2)
     
-    print(f"Results saved to {filename}")
+    print(f"Results saved to {result_file}")
 
 # ==========================================
 # Main Function
@@ -2343,33 +1303,6 @@ async def main():
             except:
                 pass
     
-    # Display information about our approach
-    print("\n" + "="*80)
-    print("INSTAGRAM AUDIENCE ANALYSIS - LLM-ENHANCED APPROACH".center(80))
-    print("="*80)
-    print(f"""
-This LLM-enhanced analysis tool examines Instagram brands and their audience by:
-
-1. Brand Profile Analysis:
-   - Visual and text content from the brand's posts
-   - Brand voice, aesthetics, and positioning
-
-2. Basic Audience Insights:
-   - Finding users who interact with the brand's content
-   - Rule-based filtering to identify real accounts
-   - Basic username pattern analysis
-   - Using lower quality threshold: {quality_threshold}/100
-
-3. Quick Insights:
-   - Summarizing brand identity and messaging
-   - Identifying potential audience interests and demographics
-   - Generating marketing recommendations
-
-With simpler requirements, this tool prioritizes getting useful results
-over perfect filtering and complex analysis.
-    """)
-    print("="*80 + "\n")
-    
     # Process each brand sequentially
     for brand in brands:
         await process_brand(brand, quality_threshold=quality_threshold)
@@ -2384,10 +1317,9 @@ over perfect filtering and complex analysis.
 if __name__ == "__main__":
     import argparse
     
-    parser = argparse.ArgumentParser(description="LLM-Enhanced Instagram Analysis Tool")
+    parser = argparse.ArgumentParser(description="Instagram Analysis Tool")
     parser.add_argument("--brand", type=str, help="Process a single brand by Instagram handle")
     parser.add_argument("--list", action="store_true", help="List all available brands")
-    parser.add_argument("--add-engaged-users", type=str, help="Add known engaged users to a brand (format: brand,user1,user2,...)")
     parser.add_argument("--limit", type=int, default=5, help="Limit number of items to process (posts, users, etc.)")
     parser.add_argument("--quality-threshold", type=int, default=30, help="Minimum quality score (0-100) for comments (default: 30)")
     
@@ -2403,65 +1335,6 @@ if __name__ == "__main__":
                 print()
         except FileNotFoundError:
             print("No brands.json file found.")
-    elif args.add_engaged_users:
-        # Handle adding known engaged users to a brand's cache
-        try:
-            parts = args.add_engaged_users.split(',')
-            if len(parts) < 2:
-                print("Error: Format should be 'brand,user1,user2,...'")
-                sys.exit(1)
-                
-            brand_handle = parts[0]
-            usernames = parts[1:]
-            
-            # Check if cache file exists
-            cache_file = f"cache/{brand_handle}_followers.json"
-            
-            if os.path.exists(cache_file):
-                with open(cache_file, 'r') as f:
-                    cached_data = json.load(f)
-                
-                # Get existing users
-                existing_users = cached_data.get("followers", [])
-                existing_usernames = {f.get("username") for f in existing_users if "username" in f}
-                
-                # Add new users
-                for username in usernames:
-                    if username and username not in existing_usernames:
-                        existing_users.append({"username": username, "source": "manual", "quality_score": 100})
-                        existing_usernames.add(username)
-                
-                # Update cache
-                cached_data["followers"] = existing_users
-                cached_data["cache_timestamp"] = datetime.now().isoformat()
-                cached_data["manually_added"] = True
-                
-                with open(cache_file, 'w') as f:
-                    json.dump(cached_data, f, indent=2)
-                
-                print(f"Added {len(usernames)} engaged users to @{brand_handle}'s cache.")
-                print(f"Total engaged users in cache: {len(existing_users)}")
-                
-            else:
-                # Create new cache file
-                followers = [{"username": username, "source": "manual", "quality_score": 100} for username in usernames if username]
-                cache_data = {
-                    "followers": followers,
-                    "cache_timestamp": datetime.now().isoformat(),
-                    "manually_added": True,
-                    "source": "manual"
-                }
-                
-                # Create cache directory if it doesn't exist
-                os.makedirs("cache", exist_ok=True)
-                
-                with open(cache_file, 'w') as f:
-                    json.dump(cache_data, f, indent=2)
-                
-                print(f"Created new cache for @{brand_handle} with {len(followers)} engaged users.")
-            
-        except Exception as e:
-            print(f"Error adding engaged users: {str(e)}")
     elif args.brand:
         # Process a single brand by Instagram handle
         try:
@@ -2472,21 +1345,6 @@ if __name__ == "__main__":
             brand = next((b for b in brands if b.get("instagram_handle") == args.brand), None)
             
             if brand:
-                # Display analysis approach information
-                print("\n" + "="*80)
-                print("LLM-ENHANCED INSTAGRAM ANALYSIS".center(80))
-                print("="*80)
-                print(f"""
-Analyzing brand profile and finding engaged users through:
-- Rule-based filtering
-- Basic username pattern analysis
-- Using lower quality threshold: {args.quality_threshold}/100
-
-For more engaged users, you can manually add them with:
-python instagram_analysis.py --add-engaged-users brand,user1,user2,...
-                """)
-                print("="*80 + "\n")
-                
                 asyncio.run(process_brand(brand, quality_threshold=args.quality_threshold))
             else:
                 print(f"Brand with Instagram handle @{args.brand} not found.")
