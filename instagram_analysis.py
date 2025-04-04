@@ -119,7 +119,7 @@ async def collect_instagram_profile(instagram_handle: str) -> Dict[str, Any]:
 
 async def collect_instagram_posts(instagram_handle: str, limit: int = 10) -> List[Dict[str, Any]]:
     """
-    Collect Instagram posts for a Shopify store
+    Collect Instagram posts for a brand's Instagram account
     """
     print(f"Collecting Instagram posts for @{instagram_handle}")
     
@@ -131,23 +131,65 @@ async def collect_instagram_posts(instagram_handle: str, limit: int = 10) -> Lis
             # Check if cache is less than 1 day old
             cache_time = datetime.fromisoformat(cached_data.get("cache_timestamp", "2000-01-01T00:00:00"))
             if (datetime.now() - cache_time).days < 1:
-                print(f"Using cached posts data for @{instagram_handle}")
-                return cached_data["posts"]
+                posts = cached_data["posts"]
+                print(f"Using cached posts data for @{instagram_handle} ({len(posts)} posts)")
+                if len(posts) < 3:
+                    print(f"Warning: Only {len(posts)} cached posts found, collecting fresh data")
+                else:
+                    return posts
     
     try:
         # Apply rate limiting
         await rate_limit("instagram_posts", 2.0)
         
-        # Run the Instagram posts scraper actor
+        # Try the main Instagram scraper actor first with correct parameters
+        print(f"Collecting posts with apify/instagram-scraper...")
         run_input = {
-            "usernames": [instagram_handle],
+            "profiles": [instagram_handle],  # Using 'profiles' rather than 'usernames'
             "resultsType": "posts",
-            "resultsLimit": limit,
-            "addParentData": False
+            "resultsLimit": limit * 2,  # Request more posts to ensure we get at least 'limit'
+            "addParentData": False,
+            "searchType": "user",
+            "searchLimit": limit * 2
         }
         
-        run = apify_client.actor("apify/instagram-scraper").call(run_input=run_input)
-        posts = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+        # First try the main Instagram scraper
+        try:
+            run = apify_client.actor("apify/instagram-scraper").call(run_input=run_input, timeout_secs=120)
+            posts = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+            
+            if not posts:
+                raise Exception("No posts returned by instagram-scraper")
+                
+        except Exception as e:
+            print(f"First scraper failed: {str(e)}, trying profile scraper...")
+            # Fallback to the profile scraper
+            profile_run_input = {
+                "usernames": [instagram_handle],
+                "resultsType": "posts",
+                "resultsLimit": limit,
+                "extendOutputFunction": """
+                    ($) => {
+                        return {
+                            id: $.id,
+                            shortCode: $.shortcode,
+                            caption: $.edge_media_to_caption?.edges[0]?.node?.text,
+                            commentsCount: $.edge_media_to_comment?.count,
+                            dimensionsHeight: $.dimensions?.height,
+                            dimensionsWidth: $.dimensions?.width,
+                            displayUrl: $.display_url,
+                            likesCount: $.edge_media_preview_like?.count,
+                            timestamp: $.taken_at_timestamp,
+                            url: `https://www.instagram.com/p/${$.shortcode}/`
+                        }
+                    }
+                """
+            }
+            
+            run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input, timeout_secs=120)
+            posts = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
+        
+        print(f"Successfully collected {len(posts)} posts for @{instagram_handle}")
         
         # Cache the results
         cache_data = {
@@ -162,7 +204,8 @@ async def collect_instagram_posts(instagram_handle: str, limit: int = 10) -> Lis
     
     except Exception as e:
         print(f"Error collecting Instagram posts: {str(e)}")
-        raise
+        # Return empty list instead of raising to prevent analysis from failing
+        return []
 
 async def analyze_comment_quality(comment: Dict[str, Any]) -> Dict[str, Any]:
     """
@@ -299,49 +342,119 @@ async def collect_users_from_hashtags(instagram_handle: str, limit: int = 30) ->
     try:
         # Get brand profile to extract potential brand-related terms
         profile_data = await collect_instagram_profile(instagram_handle)
-        brand_name = profile_data.get("fullName", "").lower().replace(" ", "")
         
-        # First try an exact match hashtag
+        # Extract the real brand name carefully - use the Instagram handle as fallback
+        brand_name = profile_data.get("fullName", instagram_handle)
+        if brand_name:
+            # Extract the first word to avoid getting extra words that might not be part of the core brand
+            brand_name_parts = brand_name.split()
+            core_brand = brand_name_parts[0].lower() if brand_name_parts else instagram_handle.lower()
+        else:
+            core_brand = instagram_handle.lower()
+            
+        # Start with the most reliable hashtags - just the Instagram handle
         hashtags_to_try = [instagram_handle.lower()]
         
-        # Add brand name if different from handle
-        if brand_name and brand_name != instagram_handle.lower():
-            hashtags_to_try.append(brand_name)
+        # Get category-specific hashtags based on the brand's bio
+        bio = profile_data.get("biography", "").lower()
+        
+        # Product-specific hashtags for different types of brands
+        if "plush" in bio or "toy" in bio or "stuffed" in bio or "squish" in bio or "soft" in bio:
+            # Plush toys or Squishable-like brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}plush", 
+                "plushies", 
+                "plushcollector", 
+                "plushtoys", 
+                "kawaiiplush",
+                "cuteplush",
+                "plushiesofinstagram"
+            ])
+        elif "shoe" in bio or "sneaker" in bio or "footwear" in bio:
+            # Footwear brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}shoes",
+                "shoelover",
+                "sneakerhead",
+                "footwear",
+                "shoeaddict"
+            ])
+        elif "glass" in bio or "eye" in bio or "spectacles" in bio or "frames" in bio:
+            # Eyewear brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}glasses",
+                "eyewear",
+                "glasses",
+                "eyeglasses",
+                "frames"
+            ])
+        elif "beauty" in bio or "makeup" in bio or "skincare" in bio:
+            # Beauty brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}beauty",
+                "beautyproducts",
+                "skincare",
+                "makeupaddicts",
+                "beautylovers"
+            ])
+        elif "coffee" in bio or "cafe" in bio or "tea" in bio:
+            # Coffee or cafe brands
+            hashtags_to_try.extend([
+                f"{instagram_handle}coffee",
+                "coffeelover",
+                "coffeeaddict",
+                "cafelife",
+                "coffeeculture"
+            ])
+        else:
+            # General brand hashtags
+            hashtags_to_try.extend([
+                f"{instagram_handle}fan",
+                f"love{instagram_handle}",
+                f"{instagram_handle}products"
+            ])
         
         # Get additional terms from bio that might be branded hashtags
-        bio = profile_data.get("biography", "")
         bio_hashtags = []
         for word in bio.split():
             if word.startswith('#'):
                 tag = word[1:].lower()
-                if len(tag) > 3:  # Only reasonably sized tags
+                # Make sure it's reasonably sized and unique
+                if len(tag) > 3:
                     bio_hashtags.append(tag)
         
-        # Add bio hashtags to our list
+        # Add verified bio hashtags to our list
         hashtags_to_try.extend(bio_hashtags)
         
-        # Also add common suffix/prefix patterns
-        if brand_name:
-            hashtags_to_try.extend([
-                f"{brand_name}life",
-                f"{brand_name}style",
-                f"{brand_name}fan",
-                f"love{brand_name}"
-            ])
+        # Remove duplicates while preserving order
+        seen = set()
+        hashtags_to_try = [h for h in hashtags_to_try if not (h in seen or seen.add(h))]
         
         # Get posts from each hashtag
         all_users = []
+        checked_hashtags = set()
         
         for hashtag in hashtags_to_try:
             if len(hashtag) < 3:
                 continue  # Skip very short hashtags
                 
-            # Check relevance first
-            relevance = await filter_hashtag_relevance(instagram_handle, hashtag)
-            if relevance < 0.3:
-                print(f"Skipping low-relevance hashtag #{hashtag} (score: {relevance:.1f})")
+            # Skip if we've already checked this hashtag
+            if hashtag in checked_hashtags:
                 continue
                 
+            checked_hashtags.add(hashtag)
+                
+            # Check relevance first using our improved filter
+            if hashtag != instagram_handle.lower() and not hashtag.startswith(instagram_handle.lower()):
+                # Keep stricter relevance check for non-exact matches
+                relevance = await filter_hashtag_relevance(instagram_handle, hashtag)
+                if relevance < 0.3 and not hashtag in bio_hashtags:
+                    print(f"Skipping low-relevance hashtag #{hashtag} (score: {relevance:.1f})")
+                    continue
+            else:
+                # Direct match gets top relevance
+                relevance = 0.9
+            
             try:
                 # Apply rate limiting
                 await rate_limit("instagram_hashtags", 5.0)  # Longer delay for hashtag searches
@@ -1449,64 +1562,152 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
         # 5. Analyze users for ICP data with LLM, but first check if they're public profiles
         print("Step 5/5: Performing deep ICP analysis with LLM...")
         icp_data = []
-        icp_limit = 15  # Increased from 7 to 15 to analyze more users
+        icp_limit = 30  # Increased from 15 to 30 to have more candidates for public profiles
+        min_public_profiles = 3  # Minimum number of public profiles we want to analyze
         
-        # Prioritize comment-based users
+        # Function to process a batch of users
+        async def process_user_batch(users_batch):
+            public_users = []
+            private_users = []
+            
+            # Quick check for public vs private profiles in parallel
+            async def check_profile_visibility(user):
+                username = user.get("username")
+                try:
+                    # Use the profile scraper with extended output function to properly get the is_private field
+                    profile_run_input = {
+                        "usernames": [username],
+                        "resultsType": "details",
+                        "extendOutputFunction": """
+                            ($) => {
+                                return {
+                                    username: $.username,
+                                    fullName: $.full_name,
+                                    biography: $.biography,
+                                    followersCount: $.edge_followed_by?.count,
+                                    followingCount: $.edge_follow?.count,
+                                    postsCount: $.edge_owner_to_timeline_media?.count,
+                                    profilePicUrl: $.profile_pic_url_hd,
+                                    is_private: $.is_private,
+                                    isBusinessAccount: $.is_business_account,
+                                    businessCategory: $.business_category_name
+                                }
+                            }
+                        """
+                    }
+                    
+                    await rate_limit("profile_check", 1.0)
+                    
+                    profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input, timeout_secs=60)
+                    profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
+                    
+                    if not profile_items:
+                        # Try one more time with a basic call
+                        await rate_limit("profile_check", 1.0)
+                        simple_run_input = {"usernames": [username]}
+                        profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=simple_run_input, timeout_secs=60)
+                        profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
+                        
+                        if not profile_items:
+                            return {"user": user, "public": False, "exists": False}
+                    
+                    # Instagram marks business profiles differently, so we consider both
+                    is_private = profile_items[0].get("is_private", True)
+                    is_business = profile_items[0].get("isBusinessAccount", False)
+                    
+                    # Business accounts should be considered public even if private flag is set
+                    is_really_public = not is_private or is_business
+                    
+                    # Also check posts count - if there are posts and it's not marked private, it's likely public
+                    posts_count = profile_items[0].get("postsCount", 0)
+                    if posts_count > 0 and not is_private:
+                        is_really_public = True
+                    
+                    return {
+                        "user": user, 
+                        "public": is_really_public, 
+                        "exists": True, 
+                        "profile_data": profile_items[0],
+                        "is_business": is_business
+                    }
+                except Exception as e:
+                    print(f"Error checking profile visibility for @{username}: {str(e)}")
+                    # Default to public so we can try to analyze it anyway
+                    return {"user": user, "public": True, "exists": True}
+            
+            # Check all profiles in parallel with a semaphore to limit concurrency
+            async def check_all_profiles():
+                sem = asyncio.Semaphore(3)  # Limit to 3 concurrent API calls
+                
+                async def check_with_semaphore(user):
+                    async with sem:
+                        return await check_profile_visibility(user)
+                
+                tasks = [check_with_semaphore(user) for user in users_batch]
+                return await asyncio.gather(*tasks)
+            
+            print(f"  - Pre-filtering batch of {len(users_batch)} profiles...")
+            profile_checks = await check_all_profiles()
+            
+            for result in profile_checks:
+                if result["public"]:
+                    public_users.append(result["user"])
+                else:
+                    if result["exists"]:
+                        private_users.append({
+                            "user": result["user"],
+                            "profile_data": result.get("profile_data", {})
+                        })
+                        print(f"  - Skipping private profile: @{result['user'].get('username')}")
+                    else:
+                        print(f"  - Skipping non-existent profile: @{result['user'].get('username')}")
+            
+            return public_users, private_users
+        
+        # Prioritize comment-based users first
         users_to_analyze = combined_users[:icp_limit]
         
-        # First, check which profiles are public to save time
-        public_users = []
-        private_users = []
-        
-        # Quick check for public vs private profiles in parallel
-        async def check_profile_visibility(user):
-            username = user.get("username")
-            try:
-                # Use a lightweight call to just check if profile is public
-                profile_run_input = {
-                    "usernames": [username],
-                    "resultsType": "details"
-                }
-                
-                await rate_limit("profile_check", 1.0)
-                
-                profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input)
-                profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
-                
-                if not profile_items:
-                    return {"user": user, "public": False, "exists": False}
-                
-                is_private = profile_items[0].get("is_private", True)
-                return {"user": user, "public": not is_private, "exists": True, "profile_data": profile_items[0]}
-            except:
-                return {"user": user, "public": False, "exists": False}
-        
-        # Check all profiles in parallel with a semaphore to limit concurrency
-        async def check_all_profiles():
-            sem = asyncio.Semaphore(3)  # Limit to 3 concurrent API calls
-            
-            async def check_with_semaphore(user):
-                async with sem:
-                    return await check_profile_visibility(user)
-            
-            tasks = [check_with_semaphore(user) for user in users_to_analyze]
-            return await asyncio.gather(*tasks)
-        
+        # Process initial batch of users
         print("  - Pre-filtering for public profiles...")
-        profile_checks = await check_all_profiles()
+        public_users, private_users = await process_user_batch(users_to_analyze)
         
-        for result in profile_checks:
-            if result["public"]:
-                public_users.append(result["user"])
-            else:
-                if result["exists"]:
-                    private_users.append({
-                        "user": result["user"],
-                        "profile_data": result.get("profile_data", {})
-                    })
-                    print(f"  - Skipping private profile: @{result['user'].get('username')}")
-                else:
-                    print(f"  - Skipping non-existent profile: @{result['user'].get('username')}")
+        # If we don't have enough public profiles, try to get more
+        remaining_attempts = 2  # Number of additional attempts to find public profiles
+        remaining_users = combined_users[icp_limit:]  # Users we haven't tried yet
+        
+        while len(public_users) < min_public_profiles and remaining_attempts > 0 and remaining_users:
+            print(f"  - Only found {len(public_users)} public profiles, attempting to find more...")
+            
+            # Get the next batch of users
+            batch_size = min(20, len(remaining_users))  # Process up to 20 more users
+            next_batch = remaining_users[:batch_size]
+            remaining_users = remaining_users[batch_size:]
+            
+            # Process this batch
+            more_public, more_private = await process_user_batch(next_batch)
+            
+            # Add to our existing lists
+            public_users.extend(more_public)
+            private_users.extend(more_private)
+            remaining_attempts -= 1
+        
+        # If still not enough, try collecting more users with a lower threshold
+        if len(public_users) < min_public_profiles and remaining_attempts > 0:
+            print(f"  - Still only found {len(public_users)} public profiles, collecting more users with lower threshold...")
+            
+            # Get more users with a lower threshold
+            lower_threshold = max(5, quality_threshold - 15)  # Even lower threshold
+            more_users = await enhanced_audience_collection(instagram_handle, limit=30, quality_threshold=lower_threshold)
+            
+            # Filter out usernames we've already checked
+            checked_usernames = {user.get("username") for user in users_to_analyze + (remaining_users or [])}
+            new_users = [user for user in more_users if user.get("username") not in checked_usernames]
+            
+            if new_users:
+                print(f"  - Found {len(new_users)} additional users to check...")
+                more_public, more_private = await process_user_batch(new_users)
+                public_users.extend(more_public)
+                private_users.extend(more_private)
         
         print(f"  - Found {len(public_users)} public profiles to analyze")
         
