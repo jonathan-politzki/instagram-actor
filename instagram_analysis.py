@@ -54,7 +54,7 @@ async def collect_instagram_profile(instagram_handle: str) -> Dict[str, Any]:
     try:
         # Run the Instagram profile scraper actor
         run_input = {
-            "directUrls": [f"https://www.instagram.com/{instagram_handle}/"],
+            "usernames": [instagram_handle],
             "resultsType": "details",
             "extendOutputFunction": """
                 ($) => {
@@ -112,7 +112,7 @@ async def collect_instagram_posts(instagram_handle: str, limit: int = 10) -> Lis
     try:
         # Run the Instagram posts scraper actor
         run_input = {
-            "directUrls": [f"https://www.instagram.com/{instagram_handle}/"],
+            "usernames": [instagram_handle],
             "resultsType": "posts",
             "resultsLimit": limit,
             "addParentData": False
@@ -154,23 +154,20 @@ async def collect_instagram_followers(instagram_handle: str, limit: int = 50) ->
                 return cached_data["followers"]
     
     try:
-        # Run the Instagram followers scraper actor
+        # Use the main Instagram Scraper actor instead
         run_input = {
-            "usernames": [instagram_handle],
-            "resultsLimit": limit,
-            "scrapeFollowers": True,
-            "scrapeFollowing": False
+            "directUrls": [f"https://www.instagram.com/{instagram_handle}/followers/"],
+            "resultsLimit": limit
         }
         
-        run = apify_client.actor("lodovit/instagram-followers-scraper").call(run_input=run_input)
+        run = apify_client.actor("apify/instagram-scraper").call(run_input=run_input)
         followers_data = list(apify_client.dataset(run["defaultDatasetId"]).iterate_items())
         
-        # Extract just the followers
+        # The structure may be different, so we'll need to extract usernames
         followers = []
         for item in followers_data:
-            if "followers" in item and instagram_handle.lower() == item.get("username", "").lower():
-                followers = item["followers"]
-                break
+            if "username" in item:
+                followers.append({"username": item["username"]})
         
         # Cache the results
         cache_data = {
@@ -207,7 +204,7 @@ async def analyze_follower_profile(username: str) -> Dict[str, Any]:
     try:
         # First check if profile is public
         profile_run_input = {
-            "directUrls": [f"https://www.instagram.com/{username}/"],
+            "usernames": [username],
             "resultsType": "details"
         }
         
@@ -236,7 +233,7 @@ async def analyze_follower_profile(username: str) -> Dict[str, Any]:
             
         # If profile is public, get their posts
         posts_run_input = {
-            "directUrls": [f"https://www.instagram.com/{username}/"],
+            "usernames": [username],
             "resultsType": "posts",
             "resultsLimit": 10,
             "addParentData": False
@@ -324,35 +321,11 @@ async def analyze_brand_profile(profile_data: Dict[str, Any], posts: List[Dict[s
     print(f"Analyzing brand profile for @{profile_data.get('username')}")
     
     # Initialize Gemini model for multimodal input
-    model = genai.GenerativeModel('gemini-2.0-pro-vision')
+    model = genai.GenerativeModel('gemini-pro')  # Changed to standard gemini-pro model for text-only analysis
     
-    # Prepare content parts for Gemini
-    content_parts = [
-        """Analyze this ecommerce store's Instagram profile as a marketing consultant. First, identify:
-        1. Brand voice and messaging style
-        2. Core product categories and focus
-        3. Visual aesthetic and design preferences
-        4. Target audience characteristics
-        5. Key topics and themes in their content
-        
-        Provide your analysis in the following JSON structure:
-        {
-            "brand_identity": "Comprehensive description of the brand's identity and positioning",
-            "messaging_style": "Analysis of their communication style and voice",
-            "visual_identity": "Description of their visual aesthetic and imagery",
-            "key_topics": ["Topic 1", "Topic 2", "Topic 3"],
-            "apparent_target_audience": "Description of who they appear to be targeting",
-            "strengths": ["Strength 1", "Strength 2"],
-            "opportunity_areas": ["Opportunity 1", "Opportunity 2"]
-        }
-        
-        Respond ONLY with valid JSON. No additional text or explanation.
-        """
-    ]
-    
-    # Add profile data
-    content_parts.append(f"""
-    Instagram Profile:
+    # Prepare text-only prompt
+    profile_text = f"""
+    Instagram Profile Analysis:
     Username: {profile_data.get('username', '')}
     Full Name: {profile_data.get('fullName', '')}
     Bio: {profile_data.get('biography', '')}
@@ -361,37 +334,52 @@ async def analyze_brand_profile(profile_data: Dict[str, Any], posts: List[Dict[s
     Posts Count: {profile_data.get('postsCount', 0)}
     Business Account: {profile_data.get('isBusinessAccount', False)}
     Business Category: {profile_data.get('businessCategory', 'N/A')}
-    """)
     
-    # Add post images and captions
+    Sample Post Captions:
+    """
+    
+    # Add post captions
     for i, post in enumerate(posts[:5]):  # Limit to 5 posts for analysis
-        display_url = post.get("displayUrl")
         caption = post.get("caption", "")
         likes = post.get("likesCount", 0)
         comments = post.get("commentsCount", 0)
         
-        if display_url:
-            # Add image to content parts
-            image_base64 = encode_image_to_base64(display_url)
-            if image_base64:
-                content_parts.append({
-                    "inline_data": {
-                        "mime_type": "image/jpeg",
-                        "data": image_base64
-                    }
-                })
-            
-            # Add post metadata
-            content_parts.append(f"""
-            Post {i+1}:
-            Caption: {caption}
-            Likes: {likes}
-            Comments: {comments}
-            """)
+        profile_text += f"""
+        Post {i+1}:
+        Caption: {caption}
+        Likes: {likes}
+        Comments: {comments}
+        """
+    
+    prompt = f"""
+    Analyze this ecommerce store's Instagram profile as a marketing consultant. First, identify:
+    1. Brand voice and messaging style
+    2. Core product categories and focus
+    3. Visual aesthetic and design preferences (based on captions)
+    4. Target audience characteristics
+    5. Key topics and themes in their content
+    
+    Here's the profile data:
+    
+    {profile_text}
+    
+    Provide your analysis in the following JSON structure:
+    {{
+        "brand_identity": "Comprehensive description of the brand's identity and positioning",
+        "messaging_style": "Analysis of their communication style and voice",
+        "visual_identity": "Description of their visual aesthetic and imagery",
+        "key_topics": ["Topic 1", "Topic 2", "Topic 3"],
+        "apparent_target_audience": "Description of who they appear to be targeting",
+        "strengths": ["Strength 1", "Strength 2"],
+        "opportunity_areas": ["Opportunity 1", "Opportunity 2"]
+    }}
+    
+    Respond ONLY with valid JSON. No additional text or explanation.
+    """
     
     try:
         # Generate content using Gemini
-        response = model.generate_content(content_parts)
+        response = model.generate_content(prompt)
         text_analysis = response.text.strip()
         
         # Parse JSON response
@@ -434,7 +422,7 @@ async def analyze_follower_content(follower_data: Dict[str, Any]) -> Dict[str, A
     posts = follower_data.get("posts", [])
     
     # Initialize Gemini model for multimodal input
-    model = genai.GenerativeModel('gemini-2.0-pro-vision')
+    model = genai.GenerativeModel('gemini-pro-vision')
     
     # Prepare content parts for Gemini
     content_parts = [
@@ -539,7 +527,7 @@ async def compare_brand_to_icp(brand_analysis: Dict[str, Any], icp_profiles: Lis
     print("Comparing brand identity with ideal customer profiles")
     
     # Initialize Gemini model
-    model = genai.GenerativeModel('gemini-2.0-pro')
+    model = genai.GenerativeModel('gemini-pro')
     
     # Extract ICP summaries
     icp_summaries = []
@@ -674,7 +662,7 @@ async def evaluate_prospect(prospect_data: Dict[str, Any], icp: Dict[str, Any]) 
     print(f"Evaluating @{username} as a potential prospect")
     
     # Initialize Gemini model
-    model = genai.GenerativeModel('gemini-2.0-pro')
+    model = genai.GenerativeModel('gemini-pro')
     
     # Extract ICP analysis
     icp_username = icp.get("username")
@@ -893,69 +881,14 @@ async def process_brand(brand: Dict[str, Any]) -> Dict[str, Any]:
     try:
         # 1. Collect brand's Instagram profile data
         profile_data = await collect_instagram_profile(instagram_handle)
+        print("✓ Successfully collected profile data")
         
         # 2. Collect brand's posts
-        posts = await collect_instagram_posts(instagram_handle, limit=10)
+        posts = await collect_instagram_posts(instagram_handle, limit=5)
+        print(f"✓ Successfully collected {len(posts)} posts")
         
-        # 3. Analyze brand profile and posts
-        brand_analysis = await analyze_brand_profile(profile_data, posts)
-        
-        # 4. Collect a sample of followers
-        followers = await collect_instagram_followers(instagram_handle, limit=50)
-        
-        # 5. Filter and sample followers for ICP analysis
-        print(f"Found {len(followers)} followers, filtering for analysis...")
-        
-        # Shuffle followers to get a random sample
-        random.shuffle(followers)
-        
-        # Analyze followers to find potential ICPs (public profiles with enough content)
-        potential_icps = []
-        for follower in followers[:20]:  # Analyze up to 20 followers
-            username = follower.get("username")
-            if not username:
-                continue
-                
-            # Check if this follower is a potential ICP
-            follower_profile = await analyze_follower_profile(username)
-            
-            # If profile is valid for ICP analysis, add to potential ICPs
-            if follower_profile.get("is_valid_icp", False):
-                potential_icps.append(follower_profile)
-                
-                # If we have enough potential ICPs, stop analysis
-                if len(potential_icps) >= 5:
-                    break
-            
-            # Rate limiting between API calls
-            await asyncio.sleep(1)
-        
-        print(f"Found {len(potential_icps)} potential ICPs for further analysis")
-        
-        # 6. Analyze each potential ICP's content
-        analyzed_icps = []
-        for potential_icp in potential_icps:
-            icp_analysis = await analyze_follower_content(potential_icp)
-            
-            # Only include suitable ICPs
-            if icp_analysis.get("is_suitable_icp", False) or \
-               (icp_analysis.get("icp_analysis", {}) and icp_analysis.get("icp_analysis", {}).get("is_suitable_icp", False)):
-                analyzed_icps.append(icp_analysis)
-            
-            # If we have enough analyzed ICPs, stop
-            if len(analyzed_icps) >= 3:
-                break
-            
-            # Rate limiting between API calls
-            await asyncio.sleep(1)
-        
-        # 7. Compare brand to ICP
-        brand_icp_comparison = await compare_brand_to_icp(brand_analysis, analyzed_icps) if analyzed_icps else {}
-        
-        # 8. Find potential prospects from ICP followers
-        potential_prospects = await find_potential_prospects(analyzed_icps, limit=3) if analyzed_icps else []
-        
-        # 9. Compile and return results
+        # For testing, skip followers and analysis
+        # Just save what we've collected so far
         results = {
             "brand": {
                 "name": name,
@@ -963,41 +896,14 @@ async def process_brand(brand: Dict[str, Any]) -> Dict[str, Any]:
                 "instagram_handle": instagram_handle
             },
             "brand_profile": profile_data,
-            "brand_analysis": brand_analysis,
-            "follower_sample_size": len(followers),
-            "ideal_customer_profiles": [
-                {
-                    "username": icp.get("username"),
-                    "profile_url": f"https://instagram.com/{icp.get('username')}",
-                    "profile_summary": icp.get("icp_analysis", {}).get("profile_summary", ""),
-                    "fit_reasoning": icp.get("icp_analysis", {}).get("reasoning", ""),
-                    "interests": icp.get("icp_analysis", {}).get("interests", []),
-                    "demographic_indicators": icp.get("icp_analysis", {}).get("demographic_indicators", [])
-                }
-                for icp in analyzed_icps
-            ],
-            "brand_icp_comparison": brand_icp_comparison,
-            "potential_prospects": [
-                {
-                    "username": prospect.get("username"),
-                    "profile_url": f"https://instagram.com/{prospect.get('username')}",
-                    "source_icp": prospect.get("source_icp"),
-                    "fit_reasoning": prospect.get("evaluation", {}).get("fit_reasoning", ""),
-                    "confidence_score": prospect.get("evaluation", {}).get("confidence_score", 0),
-                    "similarities_to_icp": prospect.get("evaluation", {}).get("similarities_to_icp", []),
-                    "approach_suggestions": prospect.get("evaluation", {}).get("approach_suggestions", "")
-                }
-                for prospect in potential_prospects
-            ],
+            "posts_sample": posts[:2],  # Just save 2 posts for verification
             "timestamp": datetime.now().isoformat(),
             "status": "completed"
         }
         
-        # Save results to file
         save_results(instagram_handle, results)
-        
         return results
-    
+        
     except Exception as e:
         error_message = f"Error processing brand {name}: {str(e)}"
         print(error_message)

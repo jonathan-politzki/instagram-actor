@@ -1,6 +1,3 @@
-# instagram-actor
-Actor that analyzes company Instagram pages and their followers and their followers' followers.
-
 # Instagram Analysis & Prospect Discovery System
 
 A tool that analyzes Shopify stores' Instagram profiles, identifies their ideal customer profiles (ICPs) from followers, and discovers potential customer prospects from the followers of those ideal customers.
@@ -8,6 +5,16 @@ A tool that analyzes Shopify stores' Instagram profiles, identifies their ideal 
 ## Overview
 
 This system helps ecommerce brands discover potential customers by analyzing the social graphs of their existing followers. It identifies patterns in the followers' profiles, determines which followers represent the "ideal customer," and then finds similar profiles that could be potential new customers.
+
+## Current Implementation Status
+
+- ✅ Brand profile collection
+- ✅ Brand posts collection
+- ⚠️ Brand analysis (text-only version implemented)
+- 🔄 Follower collection (modified to use Instagram Scraper)
+- 🔄 ICP identification
+- 🔄 Brand-ICP comparison
+- 🔄 Prospect discovery
 
 ## System Workflow
 
@@ -17,72 +24,86 @@ This system helps ecommerce brands discover potential customers by analyzing the
 4. **Brand-ICP Alignment**: Compare the brand's messaging with the ICP to identify opportunities
 5. **Prospect Discovery**: Analyze the followers of identified ICPs to find potential new customers
 
-## Data Structure
+## Data Storage
 
-The system creates two primary data files:
+The system creates various data files:
 
-* **Cache**: `cache/{instagram_handle}_data.json` - Raw Instagram data including profile and posts
+* **Cache Files**:
+  * `cache/{instagram_handle}_profile.json` - Instagram profile data
+  * `cache/{instagram_handle}_posts.json` - Instagram posts
+  * `cache/{instagram_handle}_followers.json` - Instagram followers
+  * `cache/{username}_profile.json` - Follower profile data
+
 * **Results**: `results/{instagram_handle}_{timestamp}.json` - Complete analysis including ICPs and prospects
 
-## Core Process
+## Setting Up
 
-### 1. Brand Data Collection
+### Prerequisites
 
-- Input: Brand name, URL, and Instagram username
-- Process: Scrape the brand's Instagram profile and posts
-- Output: Brand profile data, messaging style, visual identity
+- Python 3.8+
+- Apify API key
+- Google Gemini API key
 
-### 2. Follower Analysis
-
-- Input: Brand's Instagram followers
-- Process: Filter for public profiles with substantial content (excluding food/pet-only accounts)
-- Output: Sample of analyzable follower profiles (20-50 accounts)
-
-### 3. ICP Determination
-
-- Input: Follower sample data
-- Process: Analyze patterns in follower profiles, identify common characteristics
-- Output: Ideal customer profile description and 2-3 example accounts
-
-### 4. Brand-ICP Comparison
-
-- Input: Brand profile and ICP data
-- Process: Compare brand messaging with ICP characteristics
-- Output: Alignment analysis and opportunity identification
-
-### 5. Prospect Discovery
-
-- Input: ICP example accounts
-- Process: Analyze followers of ICP accounts
-- Output: 3-5 potential customer prospects with explanation of fit
-
-## Running the System
+### Installation
 
 ```bash
+# Clone the repository
+git clone https://github.com/yourusername/instagram-analysis.git
+cd instagram-analysis
+
+# Create a virtual environment
+python -m venv venv
+source venv/bin/activate  # On Windows: venv\Scripts\activate
+
 # Install dependencies
 pip install -r requirements.txt
 
 # Create .env file with API keys
 echo "APIFY_API_KEY=your_apify_key_here" > .env
 echo "GEMINI_API_KEY=your_gemini_key_here" >> .env
+```
 
-# Create a brands.json file with target brands
-# Example:
-# [
-#   {
-#     "name": "Brand Name",
-#     "url": "https://store-url.com",
-#     "instagram_handle": "brandname"
-#   }
-# ]
+### Create Brand List
 
-# Run the analysis
+Create a `brands.json` file with your target brands:
+
+```json
+[
+  {
+    "name": "Allbirds",
+    "url": "https://www.allbirds.com",
+    "instagram_handle": "allbirds"
+  },
+  {
+    "name": "Warby Parker",
+    "url": "https://www.warbyparker.com",
+    "instagram_handle": "warbyparker"
+  }
+]
+```
+
+## Running the System
+
+### Basic Collection (Current Working Mode)
+
+```bash
+# List available brands
+python instagram_analysis.py --list
+
+# Process a specific brand
+python instagram_analysis.py --brand allbirds
+
+# Process all brands
 python instagram_analysis.py
 ```
 
+### Full Analysis (Coming Soon)
+
+The full analysis pipeline will be enabled once all components are tested and working.
+
 ## Output Data Format
 
-The result file (`results/{instagram_handle}_{timestamp}.json`) contains:
+The current output includes basic profile and post data:
 
 ```json
 {
@@ -91,70 +112,77 @@ The result file (`results/{instagram_handle}_{timestamp}.json`) contains:
     "url": "https://store-url.com",
     "instagram_handle": "brandname"
   },
-  "brand_analysis": {
-    "brand_identity": "Description of brand identity...",
-    "messaging_style": "Description of messaging approach...",
-    "visual_identity": "Description of visual style...",
-    "key_topics": ["Topic 1", "Topic 2", "Topic 3"]
+  "brand_profile": {
+    "username": "brandname",
+    "fullName": "Brand Name",
+    "biography": "Brand description...",
+    "followersCount": 12345,
+    "followingCount": 543,
+    "postsCount": 321,
+    "isBusinessAccount": true
   },
-  "follower_analysis": {
-    "sample_size": 25,
-    "demographics": {
-      "age_range": "25-34 primarily",
-      "common_locations": ["New York", "Los Angeles", "Chicago"],
-      "interests": ["Fashion", "Sustainability", "Travel"]
-    }
-  },
-  "ideal_customer_profiles": [
+  "posts_sample": [
     {
-      "username": "follower1",
-      "profile_summary": "Description of this ICP...",
-      "fit_reasoning": "Why this represents an ideal customer...",
-      "profile_url": "https://instagram.com/follower1"
-    },
-    {
-      "username": "follower2",
-      "profile_summary": "Description of this ICP...",
-      "fit_reasoning": "Why this represents an ideal customer...",
-      "profile_url": "https://instagram.com/follower2"
+      "type": "Image",
+      "caption": "Post caption...",
+      "likesCount": 123,
+      "commentsCount": 45
     }
   ],
-  "brand_icp_comparison": {
-    "alignment_score": 85,
-    "aligned_aspects": ["Visual style", "Value messaging"],
-    "opportunity_areas": ["Could better highlight sustainability", "More user-generated content"]
-  },
-  "potential_prospects": [
-    {
-      "username": "prospect1",
-      "source_icp": "follower1",
-      "profile_summary": "Description of this prospect...",
-      "fit_reasoning": "Why they would be a good customer...",
-      "profile_url": "https://instagram.com/prospect1"
-    },
-    {
-      "username": "prospect2",
-      "source_icp": "follower1",
-      "profile_summary": "Description of this prospect...",
-      "fit_reasoning": "Why they would be a good customer...",
-      "profile_url": "https://instagram.com/prospect2"
-    }
-  ],
-  "timestamp": "2025-04-03T14:35:22.123Z"
+  "timestamp": "2025-04-03T21:37:16.123Z",
+  "status": "completed"
 }
 ```
 
-## Next Steps
+Future versions will include full analysis with:
+- Brand analysis (identity, messaging style, visual identity)
+- Ideal customer profiles
+- Brand-ICP comparison
+- Potential prospects
 
-1. Run initial analysis on a few test brands
-2. Review the quality of ICP identification
-3. Assess the relevance of discovered prospects
-4. Build a simple UI to visualize the results
+## Development Roadmap
 
-## Technical Components
+1. ✅ **Phase 1**: Basic data collection infrastructure
+   - Instagram profile and post collection
 
-- Instagram data collection via Apify
-- Visual analysis using Google's Gemini Vision API
-- Content analysis for profile filtering
-- Profile similarity detection
-- Structured data storage
+2. 🔄 **Phase 2**: Analysis implementation
+   - Brand analysis
+   - Follower collection and filtering
+   - ICP identification
+
+3. 🔄 **Phase 3**: Discovery implementation
+   - Brand-ICP comparison
+   - Prospect identification
+   - Fit reasoning
+
+4. 🔄 **Phase 4**: Integration and refinement
+   - UI development
+   - Rate limiting and error handling improvements
+   - Documentation and examples
+
+## Technical Notes
+
+- This tool uses Apify's Instagram scrapers for data collection
+- Analysis is performed using Google's Gemini AI models
+- The system implements caching to prevent redundant API calls
+- All data is stored locally for privacy and cost efficiency
+
+## Troubleshooting
+
+### Common Issues
+
+- **API Key Errors**: Ensure your `.env` file has the correct API keys
+- **Rate Limiting**: Instagram may rate-limit scraping. Adding delays between requests can help
+- **Missing Data**: Some profiles may be private or have limited content
+
+### Debug Mode
+
+For detailed logging during execution, run with the debug flag (coming soon):
+
+```bash
+python instagram_analysis.py --brand allbirds --debug
+```
+
+## License
+
+[MIT License](LICENSE)
