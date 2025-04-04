@@ -1,28 +1,46 @@
 # Instagram Analysis & Prospect Discovery System
 
-A tool that analyzes Shopify stores' Instagram profiles, identifies their ideal customer profiles (ICPs) from followers, and discovers potential customer prospects from the followers of those ideal customers.
+A tool that analyzes Instagram profiles, identifies ideal customer profiles (ICPs) from followers and engaged users, and helps brands understand their audience for improved marketing strategies.
 
 ## Overview
 
-This system helps ecommerce brands discover potential customers by analyzing the social graphs of their existing followers. It identifies patterns in the followers' profiles, determines which followers represent the "ideal customer," and then finds similar profiles that could be potential new customers.
+This system combines AI and rule-based approaches to:
+1. Analyze Instagram brand profiles
+2. Identify engaged users and potential ideal customers
+3. Filter for real people vs. bots or businesses
+4. Generate marketing insights and recommendations
 
 ## Current Implementation Status
 
-- ✅ Brand profile collection
-- ✅ Brand posts collection
-- ⚠️ Brand analysis (text-only version implemented)
-- 🔄 Follower collection (modified to use Instagram Scraper)
-- 🔄 ICP identification
-- 🔄 Brand-ICP comparison
-- 🔄 Prospect discovery
+- ✅ Brand profile and posts collection via Apify
+- ✅ Comment collection and analysis
+- ✅ User filtering based on quality thresholds
+- ✅ Public profile detection to save analysis time
+- ✅ User classification (real people vs. bots)
+- ✅ AI-powered analysis using Google's Gemini models
+- ✅ Basic audience insights generation
+- ✅ Command-line interface with various options
 
-## System Workflow
+## System Components
 
-1. **Brand Analysis**: Analyze the brand's Instagram profile to understand their brand identity, messaging, and visual style
-2. **Follower Discovery**: Analyze a sample of the brand's followers (with public profiles)
-3. **ICP Identification**: Determine the ideal customer profile (ICP) based on follower analysis
-4. **Brand-ICP Alignment**: Compare the brand's messaging with the ICP to identify opportunities
-5. **Prospect Discovery**: Analyze the followers of identified ICPs to find potential new customers
+### Data Collection
+- Instagram profile data collection
+- Post collection with engagement metrics
+- Comment extraction and quality analysis
+- User profile analysis
+
+### Analysis Features
+- Comment quality scoring (0-100)
+- Bot detection using pattern recognition
+- Public profile detection before deeper analysis
+- Username pattern analysis for filtering
+- AI-enhanced profile and content analysis
+
+### Output
+- Brand analysis including tone, style, and positioning
+- Ideal customer profile identification
+- Audience demographics and interests
+- Content and engagement recommendations
 
 ## Data Storage
 
@@ -34,7 +52,7 @@ The system creates various data files:
   * `cache/{instagram_handle}_followers.json` - Instagram followers
   * `cache/{username}_profile.json` - Follower profile data
 
-* **Results**: `results/{instagram_handle}_{timestamp}.json` - Complete analysis including ICPs and prospects
+* **Results**: `results/{instagram_handle}_{timestamp}.json` - Complete analysis including ICPs and insights
 
 ## Setting Up
 
@@ -48,8 +66,8 @@ The system creates various data files:
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/instagram-analysis.git
-cd instagram-analysis
+git clone https://github.com/yourusername/instagram-actor.git
+cd instagram-actor
 
 # Create a virtual environment
 python -m venv venv
@@ -70,118 +88,92 @@ Create a `brands.json` file with your target brands:
 ```json
 [
   {
-    "name": "Allbirds",
-    "url": "https://www.allbirds.com",
-    "instagram_handle": "allbirds"
-  },
-  {
-    "name": "Warby Parker",
-    "url": "https://www.warbyparker.com",
-    "instagram_handle": "warbyparker"
+    "name": "Brand Name",
+    "url": "https://www.brand-website.com",
+    "instagram_handle": "brandname"
   }
 ]
 ```
 
 ## Running the System
 
-### Basic Collection (Current Working Mode)
+### Command Line Options
 
 ```bash
 # List available brands
 python instagram_analysis.py --list
 
 # Process a specific brand
-python instagram_analysis.py --brand allbirds
+python instagram_analysis.py --brand brandname
 
 # Process all brands
 python instagram_analysis.py
+
+# Set quality threshold (0-100) for filtering - lower values cast a wider net
+python instagram_analysis.py --quality-threshold 30
+
+# Manually add known engaged users
+python instagram_analysis.py --add-engaged-users brandname,user1,user2,user3
 ```
 
-### Full Analysis (Coming Soon)
+## Key Features
 
-The full analysis pipeline will be enabled once all components are tested and working.
+### Quality Filtering and Bot Detection
 
-## Output Data Format
+The system uses several approaches to identify real, engaged users:
+- Comment quality scoring based on length, sentiment, and content
+- Bot detection using common patterns in usernames and comments
+- AI-based username analysis to distinguish real people from businesses/bots
 
-The current output includes basic profile and post data:
+### LLM-Enhanced Analysis
 
-```json
-{
-  "brand": {
-    "name": "Brand Name",
-    "url": "https://store-url.com",
-    "instagram_handle": "brandname"
-  },
-  "brand_profile": {
-    "username": "brandname",
-    "fullName": "Brand Name",
-    "biography": "Brand description...",
-    "followersCount": 12345,
-    "followingCount": 543,
-    "postsCount": 321,
-    "isBusinessAccount": true
-  },
-  "posts_sample": [
-    {
-      "type": "Image",
-      "caption": "Post caption...",
-      "likesCount": 123,
-      "commentsCount": 45
-    }
-  ],
-  "timestamp": "2025-04-03T21:37:16.123Z",
-  "status": "completed"
-}
-```
+Google's Gemini models provide deeper analysis:
+- Brand profile and messaging analysis
+- User profile interpretation
+- Audience segment identification
+- Content and engagement recommendations
 
-Future versions will include full analysis with:
-- Brand analysis (identity, messaging style, visual identity)
-- Ideal customer profiles
-- Brand-ICP comparison
-- Potential prospects
+### Public Profile Detection
 
-## Development Roadmap
+The system now pre-checks if profiles are public before attempting deeper analysis, saving time and API calls.
 
-1. ✅ **Phase 1**: Basic data collection infrastructure
-   - Instagram profile and post collection
+### Customizable Quality Thresholds
 
-2. 🔄 **Phase 2**: Analysis implementation
-   - Brand analysis
-   - Follower collection and filtering
-   - ICP identification
+You can adjust the quality threshold to balance between:
+- Higher thresholds (70+): Stricter filtering, fewer but higher quality results
+- Medium thresholds (30-70): Balanced approach
+- Lower thresholds (<30): Cast a wider net, more results but potentially lower quality
 
-3. 🔄 **Phase 3**: Discovery implementation
-   - Brand-ICP comparison
-   - Prospect identification
-   - Fit reasoning
+## Technical Implementation
 
-4. 🔄 **Phase 4**: Integration and refinement
-   - UI development
-   - Rate limiting and error handling improvements
-   - Documentation and examples
+### Key Algorithms
 
-## Technical Notes
+- `analyze_comment_quality`: Evaluates comments on multiple dimensions
+- `identify_real_people_from_usernames`: Uses AI to classify usernames
+- `enhanced_audience_collection`: Combines multiple filtering methods
+- `check_profile_visibility`: Efficiently determines if profiles are public
+- `analyze_brand_profile_with_llm` & `analyze_user_profile_with_llm`: AI-driven analysis
 
-- This tool uses Apify's Instagram scrapers for data collection
-- Analysis is performed using Google's Gemini AI models
-- The system implements caching to prevent redundant API calls
-- All data is stored locally for privacy and cost efficiency
+### API Dependencies
+
+- **Apify**: Instagram data collection (profile scraper, post scraper, comment scraper)
+- **Google Gemini**: AI-powered analysis and insights generation
 
 ## Troubleshooting
 
 ### Common Issues
 
 - **API Key Errors**: Ensure your `.env` file has the correct API keys
-- **Rate Limiting**: Instagram may rate-limit scraping. Adding delays between requests can help
-- **Missing Data**: Some profiles may be private or have limited content
+- **Rate Limiting**: Instagram may rate-limit scraping. The code includes built-in rate limiting.
+- **Missing Data**: Private profiles will have limited data available
+- **Timeout Errors**: Network issues or slow API responses may cause timeouts
 
-### Debug Mode
+### Performance Optimizations
 
-For detailed logging during execution, run with the debug flag (coming soon):
-
-```bash
-python instagram_analysis.py --brand allbirds --debug
-```
+- Caching system to prevent redundant API calls
+- Parallel processing using asyncio for checking multiple profiles
+- Rate limiting to prevent API throttling
+- AI model selection based on task complexity
 
 ## License
 

@@ -926,7 +926,7 @@ async def analyze_follower_content(follower_data: Dict[str, Any]) -> Dict[str, A
 async def identify_real_people_from_usernames(usernames: List[str], brand_handle: str) -> List[Dict[str, Any]]:
     """
     Uses simple rules to identify usernames likely belonging to real people
-    versus businesses or bots.
+    versus businesses or bots. Uses a more permissive approach to cast a wider net.
     
     Args:
         usernames: List of Instagram usernames to analyze
@@ -950,31 +950,53 @@ async def identify_real_people_from_usernames(usernames: List[str], brand_handle
         if not username:
             continue
             
-        # Basic business indicators
-        business_words = ["shop", "store", "brand", "official", "boutique", "wear", 
-                         "fashion", "apparel", "inc", "llc", "co_", "_co", ".co"]
+        # Only filter obvious business indicators
+        business_indicators = 0
+        bot_indicators = 0
         
-        # Basic bot indicators
-        bot_words = ["bot", "follow", "spam", "promo"]
+        # Basic business indicators - REDUCED list to only catch obvious ones
+        business_words = ["shop", "store", "official", "boutique", "brand"]
         
-        # Simple classification
+        # Check for business patterns
         if any(word in username.lower() for word in business_words):
+            business_indicators += 1
+        
+        # Look for LLC, INC, CO patterns
+        if any(marker in username.lower() for marker in ["llc", "inc", ".co", "_co"]):
+            business_indicators += 1
+            
+        # Basic bot indicators - REDUCED list
+        bot_words = ["follow4follow", "f4f", "l4l", "followme", "getfollowers"]
+        
+        # Check for bot patterns
+        if any(word in username.lower() for word in bot_words):
+            bot_indicators += 1
+            
+        # Check for extremely long usernames with random characters
+        if len(username) > 30 or username.count('_') > 3:
+            bot_indicators += 1
+            
+        # Classify based on indicators
+        if business_indicators >= 2:
             business_count += 1
             continue
-        elif any(word in username.lower() for word in bot_words) or len(username) > 25:
+        elif bot_indicators >= 2:
             bot_count += 1
             continue
         else:
-            # It's likely a person
-            quality = "medium"
-            if len(username) < 15 and username.count("_") <= 1:
+            # Determine quality based on username characteristics
+            quality = "medium"  # Default is medium now to be more inclusive
+            
+            # High quality indicators
+            if len(username) < 20 and username.count("_") <= 1 and not username.endswith(tuple(['1','2','3','4','5','6','7','8','9','0'])):
                 quality = "high"
                 
+            # Add to real people list
             real_people.append({
                 "username": username,
                 "category": "likely_person",
                 "engagement_quality": quality,
-                "reasoning": "Simple pattern matching (API fallback)"
+                "reasoning": "Simple pattern matching (more inclusive approach)"
             })
     
     # Get counts for summary
@@ -1002,15 +1024,23 @@ async def enhanced_audience_collection(instagram_handle: str, limit: int = 50, q
     print(f"🔍 Enhanced audience collection for @{instagram_handle}")
     print(f"  Using comment quality threshold: {quality_threshold}")
     
-    # First collect users with a LOWER threshold than specified
+    # First collect users with a MUCH LOWER threshold than specified
     # to get more candidates (we'll still filter later)
-    actual_threshold = max(10, quality_threshold - 20)  # Use a much lower bar to get more candidates
-    standard_users = await collect_instagram_followers(instagram_handle, limit=limit*2, quality_threshold=actual_threshold)
+    actual_threshold = max(5, quality_threshold - 25)  # Use an extremely low bar to get more candidates
+    standard_users = await collect_instagram_followers(instagram_handle, limit=limit*3, quality_threshold=actual_threshold)
     
-    if not standard_users:
-        print("No users found. Trying alternate collection methods...")
-        # Try hashtag-based collection as fallback with very low quality requirements
-        standard_users = await collect_users_from_hashtags(instagram_handle, limit=limit*2)
+    if not standard_users or len(standard_users) < limit:
+        print("Not enough users found. Trying alternate collection methods...")
+        # Try hashtag-based collection as additional source with very low quality requirements
+        hashtag_users = await collect_users_from_hashtags(instagram_handle, limit=limit*2)
+        
+        # Combine users from both sources, avoiding duplicates
+        if hashtag_users:
+            existing_usernames = {user.get("username") for user in standard_users}
+            for user in hashtag_users:
+                if user.get("username") not in existing_usernames:
+                    standard_users.append(user)
+                    existing_usernames.add(user.get("username"))
     
     if not standard_users:
         print("⚠️ Could not collect any users for analysis")
@@ -1018,6 +1048,8 @@ async def enhanced_audience_collection(instagram_handle: str, limit: int = 50, q
     
     # Extract usernames
     all_usernames = [user.get("username") for user in standard_users if user.get("username")]
+    
+    print(f"  - Collected {len(all_usernames)} potential users before filtering")
     
     # Use our simplified rule-based approach
     real_people_data = await identify_real_people_from_usernames(all_usernames, instagram_handle)
@@ -1041,7 +1073,7 @@ async def enhanced_audience_collection(instagram_handle: str, limit: int = 50, q
     print(f"  - Starting users: {len(standard_users)}")
     print(f"  - After rule-based filtering: {len(enhanced_users)}")
     
-    # Return all users classified as real people, up to the limit
+    # Return all users classified as real people, up to the increased limit
     return enhanced_users[:limit]
 
 async def collect_user_profile_posts(username: str, limit: int = 3) -> Dict[str, Any]:
@@ -1183,10 +1215,14 @@ async def analyze_comments_for_icp(comments: List[Dict[str, Any]], brand_handle:
         
     print(f"Analyzing {len(comments)} comments to identify potential ICPs...")
     
-    # Filter out low-quality comments first
-    quality_comments = [c for c in comments if c.get("quality_score", 0) >= 40]
+    # Filter out very low-quality comments - more inclusive threshold
+    quality_comments = [c for c in comments if c.get("quality_score", 0) >= 20]
     
     icp_candidates = {}
+    
+    # Normalize brand name for pattern matching
+    brand_name_lower = brand_name.lower()
+    brand_handle_lower = brand_handle.lower()
     
     # Evaluate each comment for ICP potential
     for comment in quality_comments:
@@ -1206,46 +1242,72 @@ async def analyze_comments_for_icp(comments: List[Dict[str, Any]], brand_handle:
             
             # Count the comments from this user
             icp_candidates[username]["comment_count"] += 1
+            
+            # Accumulate ICP signals across multiple comments
+            icp_candidates[username]["icp_signals"] += 1
             continue
             
         # Check for ICP signals in the comment text
         icp_signals = 0
         
-        # Personal experience with product
+        # Personal experience with product - expanded patterns
         if any(phrase in text.lower() for phrase in [
             "i have", "i bought", "i love", "i use", "i wear", "i own", "i got",
-            "my pair", "my new", "mine", "i'm wearing", "i am wearing"
+            "my pair", "my new", "mine", "i'm wearing", "i am wearing", "i ordered",
+            "i received", "i purchased", "just got", "arrived today", "delivered",
+            "i tried", "wearing my", "using my", "bought these", "got these"
         ]):
             icp_signals += 2
             
-        # Product knowledge
+        # Product knowledge - expanded patterns
         if any(phrase in text.lower() for phrase in [
             "quality", "comfort", "fit", "design", "material", "feature", "technology",
-            "waterproof", "breathable", "durable", "lightweight", "performance"
+            "waterproof", "breathable", "durable", "lightweight", "performance",
+            "sizing", "color", "cushioning", "support", "style", "laces", "sole",
+            "fabric", "stitching", "color way", "colorway", "release", "drop",
+            "limited edition", "exclusive", "collaboration", "collab", "authentic"
         ]):
             icp_signals += 1
             
-        # Brand loyalty
+        # Brand loyalty - expanded patterns
         if any(phrase in text.lower() for phrase in [
             "favorite brand", "best brand", "loyal", "always buy", "never disappoint", 
-            "never fails", "consistently", "collection", "fan", "love the brand"
+            "never fails", "consistently", "collection", "fan", "love the brand",
+            "always choose", "go-to", "go to", "only wear", "always wear", "trust",
+            "reliable", "never lets me down", "been wearing for years", "since day one"
         ]):
             icp_signals += 2
             
-        # Emotional connection
+        # Emotional connection - expanded patterns
         if any(word in text.lower() for word in [
             "amazing", "awesome", "incredible", "perfect", "love", "beautiful", "excellent",
-            "outstanding", "extraordinary", "impressive", "exceptional"
+            "outstanding", "extraordinary", "impressive", "exceptional", "fantastic",
+            "great", "stunning", "wonderful", "stylish", "cool", "dope", "fire", "lit",
+            "obsessed", "addicted", "can't get enough", "need more", "best", "favorite"
         ]):
             icp_signals += 1
             
-        # Question about product/brand (engagement)
+        # Question about product/brand (engagement) - expanded patterns
         if "?" in text and any(word in text.lower() for word in [
-            "available", "release", "when", "where", "how", "which", "recommend", "sizing", "price"
+            "available", "release", "when", "where", "how", "which", "recommend", "sizing", "price",
+            "restock", "coming out", "sell", "shipping", "delivery", "store", "shop", "online",
+            "website", "app", "discount", "sale", "upcoming", "next", "color", "size", "fit"
         ]):
             icp_signals += 1
             
-        # Create ICP candidate record
+        # Direct mention of the brand - new pattern
+        if brand_name_lower in text.lower() or brand_handle_lower in text.lower():
+            icp_signals += 1
+            
+        # High engagement - leaving detailed comment
+        if len(text) > 100:
+            icp_signals += 1
+        
+        # Any comment engagement is worth something - more inclusive
+        if icp_signals == 0 and len(text) > 10:
+            icp_signals = 0.5
+            
+        # Create ICP candidate record with more inclusive thresholds
         icp_quality = "low"
         if icp_signals >= 3:
             icp_quality = "high"
@@ -1266,7 +1328,7 @@ async def analyze_comments_for_icp(comments: List[Dict[str, Any]], brand_handle:
     result = list(icp_candidates.values())
     result.sort(key=lambda x: (x.get("icp_signals", 0), x.get("quality_score", 0)), reverse=True)
     
-    # Return top candidates
+    # Return all candidates - more inclusive
     return result
 
 async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_ai_filtering: bool = True) -> Dict[str, Any]:
@@ -1321,7 +1383,7 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
             try:
                 run_input = {
                     "directUrls": [f"https://www.instagram.com/p/{post_id}/"],
-                    "resultsLimit": 50  # Get a reasonable number of comments per post
+                    "resultsLimit": 100  # Increased from 50 to get more comments
                 }
                 
                 run = apify_client.actor("apify/instagram-comment-scraper").call(run_input=run_input, timeout_secs=60)
@@ -1342,12 +1404,14 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
         
         print(f"  - Collected and analyzed {len(all_comments)} comments")
         
-        # 4b. Identify ICPs from comments
-        comment_icp_candidates = await analyze_comments_for_icp(all_comments, instagram_handle, name)
+        # 4b. Identify ICPs from comments - use a lower quality threshold
+        comment_quality_threshold = max(10, quality_threshold - 15)  # Lower threshold to cast wider net
+        filtered_comments = [c for c in all_comments if c.get("quality_score", 0) >= comment_quality_threshold]
+        comment_icp_candidates = await analyze_comments_for_icp(filtered_comments, instagram_handle, name)
         print(f"  - Identified {len(comment_icp_candidates)} potential ICPs from comments")
         
-        # 4c. Use rules-based username filtering as a secondary method
-        engaged_users = await enhanced_audience_collection(instagram_handle, limit=15, quality_threshold=quality_threshold)
+        # 4c. Use rules-based username filtering as a secondary method - increased limit
+        engaged_users = await enhanced_audience_collection(instagram_handle, limit=30, quality_threshold=quality_threshold)
         
         if engaged_users:
             print(f"  - Found {len(engaged_users)} users through username filtering")
@@ -1382,40 +1446,211 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
         
         print(f"  - Combined total of {len(combined_users)} unique engaged users")
         
-        # 5. Analyze users for ICP data with LLM
+        # 5. Analyze users for ICP data with LLM, but first check if they're public profiles
         print("Step 5/5: Performing deep ICP analysis with LLM...")
         icp_data = []
-        icp_limit = 7  # Analyze up to 7 users
+        icp_limit = 15  # Increased from 7 to 15 to analyze more users
         
         # Prioritize comment-based users
-        for i, user in enumerate(combined_users[:icp_limit]):
+        users_to_analyze = combined_users[:icp_limit]
+        
+        # First, check which profiles are public to save time
+        public_users = []
+        private_users = []
+        
+        # Quick check for public vs private profiles in parallel
+        async def check_profile_visibility(user):
+            username = user.get("username")
+            try:
+                # Use a lightweight call to just check if profile is public
+                profile_run_input = {
+                    "usernames": [username],
+                    "resultsType": "details"
+                }
+                
+                await rate_limit("profile_check", 1.0)
+                
+                profile_run = apify_client.actor("apify/instagram-profile-scraper").call(run_input=profile_run_input)
+                profile_items = list(apify_client.dataset(profile_run["defaultDatasetId"]).iterate_items())
+                
+                if not profile_items:
+                    return {"user": user, "public": False, "exists": False}
+                
+                is_private = profile_items[0].get("is_private", True)
+                return {"user": user, "public": not is_private, "exists": True, "profile_data": profile_items[0]}
+            except:
+                return {"user": user, "public": False, "exists": False}
+        
+        # Check all profiles in parallel with a semaphore to limit concurrency
+        async def check_all_profiles():
+            sem = asyncio.Semaphore(3)  # Limit to 3 concurrent API calls
+            
+            async def check_with_semaphore(user):
+                async with sem:
+                    return await check_profile_visibility(user)
+            
+            tasks = [check_with_semaphore(user) for user in users_to_analyze]
+            return await asyncio.gather(*tasks)
+        
+        print("  - Pre-filtering for public profiles...")
+        profile_checks = await check_all_profiles()
+        
+        for result in profile_checks:
+            if result["public"]:
+                public_users.append(result["user"])
+            else:
+                if result["exists"]:
+                    private_users.append({
+                        "user": result["user"],
+                        "profile_data": result.get("profile_data", {})
+                    })
+                    print(f"  - Skipping private profile: @{result['user'].get('username')}")
+                else:
+                    print(f"  - Skipping non-existent profile: @{result['user'].get('username')}")
+        
+        print(f"  - Found {len(public_users)} public profiles to analyze")
+        
+        # If we have public profiles, analyze them in detail
+        if public_users:
+            for i, user in enumerate(public_users):
+                username = user.get("username")
+                if not username:
+                    continue
+                    
+                # Show source for better insights
+                source_info = ""
+                if user.get("source") == "comment":
+                    source_info = f" (comment-based, quality: {user.get('icp_quality', 'unknown')})"
+                
+                print(f"Analyzing potential ICP: @{username}{source_info}...")
+                
+                # Get user profile data
+                user_profile = await collect_user_profile_posts(username, limit=3)
+                
+                # Add the comment text if available (helps with analysis)
+                if user.get("comment_text"):
+                    if "comments" not in user_profile:
+                        user_profile["comments"] = []
+                    user_profile["comments"].append({
+                        "text": user.get("comment_text", ""),
+                        "count": user.get("comment_count", 1)
+                    })
+                
+                # LLM-based ICP analysis
+                if user_profile:
+                    analyzed_user = await analyze_user_profile_with_llm(user_profile, instagram_handle, name)
+                    icp_data.append(analyzed_user)
+        
+        # Analyze private profiles with limited data-based analysis
+        print(f"  - Analyzing {len(private_users)} private profiles with limited data...")
+        
+        for item in private_users:
+            user = item["user"]
             username = user.get("username")
             if not username:
                 continue
+            
+            # Basic inferred data from username and comments
+            is_comment_user = user.get("source") == "comment"
+            comment_text = user.get("comment_text", "")
+            comment_count = user.get("comment_count", 0)
+            
+            # Get interests based on comment text if available
+            inferred_interests = []
+            engagement_potential = "low"
+            
+            # Enhanced visibility using available data
+            if is_comment_user and comment_text:
+                # Check for product interest signals
+                if any(keyword in comment_text.lower() for keyword in [
+                    "shoes", "sneakers", "running", "training", "workout", "sport", 
+                    "apparel", "jersey", "jacket", "fit", "performance"
+                ]):
+                    inferred_interests.append("Athletic footwear")
+                    inferred_interests.append("Sports apparel")
+                    engagement_potential = "medium"
                 
-            # Show source for better insights
-            source_info = ""
-            if user.get("source") == "comment":
-                source_info = f" (comment-based, quality: {user.get('icp_quality', 'unknown')})"
+                # Check for brand interest
+                if "nike" in comment_text.lower() or any(word in comment_text.lower() for word in ["jordans", "air max", "airmax"]):
+                    inferred_interests.append("Nike products")
+                    engagement_potential = "medium"
+                    
+                # Check for fashion interest
+                if any(keyword in comment_text.lower() for keyword in [
+                    "style", "fashion", "look", "design", "cool", "love", "want", "need"
+                ]):
+                    inferred_interests.append("Fashion")
+                    inferred_interests.append("Streetwear")
+                    
+                # High engagement potential if multiple comments or detailed feedback
+                if comment_count > 1 or len(comment_text) > 100:
+                    engagement_potential = "high"
             
-            print(f"Analyzing potential ICP: @{username}{source_info}...")
+            # Try to infer interest from username patterns
+            username_lower = username.lower()
+            if any(keyword in username_lower for keyword in [
+                "run", "fitness", "fit", "gym", "sport", "athlete", "coach", "train"
+            ]):
+                inferred_interests.append("Fitness")
+                inferred_interests.append("Sports")
+                engagement_potential = "medium"
+                
+            # Create a minimal profile with available data
+            full_name = item.get("profile_data", {}).get("full_name", "Unknown")
+            follower_count = item.get("profile_data", {}).get("followersCount", 0)
             
-            # Get user profile data
-            user_profile = await collect_user_profile_posts(username, limit=3)
+            # Set up reasoning based on available data
+            if is_comment_user:
+                reasoning = f"Limited analysis based on comment engagement. User has commented: '{comment_text[:100]}...'"
+                if comment_count > 1:
+                    reasoning += f" User has made {comment_count} comments on brand posts."
+            else:
+                reasoning = "Limited analysis based on username patterns only. Profile is private."
+                
+            # Make an inference on ICP suitability
+            is_suitable = engagement_potential != "low" or len(inferred_interests) > 0
+                
+            minimal_profile = {
+                "username": username,
+                "profile_data": {
+                    "username": username,
+                    "full_name": full_name,
+                    "bio": "Private profile",
+                    "follower_count": follower_count
+                },
+                "icp_analysis": {
+                    "is_suitable_icp": is_suitable,
+                    "reasoning": reasoning,
+                    "profile_summary": f"Private Instagram profile for @{username}",
+                    "interests": inferred_interests if inferred_interests else ["Unknown due to private profile"],
+                    "demographic_indicators": [],
+                    "brand_affinities": ["Nike"] if "nike" in comment_text.lower() else [],
+                    "engagement_potential": engagement_potential
+                },
+                "is_private": True,
+                "posts_count": 0,
+                "comments_count": comment_count
+            }
             
-            # Add the comment text if available (helps with analysis)
-            if user.get("comment_text"):
-                if "comments" not in user_profile:
-                    user_profile["comments"] = []
-                user_profile["comments"].append({
-                    "text": user.get("comment_text", ""),
-                    "count": user.get("comment_count", 1)
-                })
-            
-            # LLM-based ICP analysis
-            if user_profile:
-                analyzed_user = await analyze_user_profile_with_llm(user_profile, instagram_handle, name)
-                icp_data.append(analyzed_user)
+            # Add to ICP data
+            icp_data.append(minimal_profile)
+        
+        # If we don't have any ICP data from either public or private profiles, add minimal placeholder
+        if not icp_data:
+            print("  - No usable profile data found. Adding minimal placeholder for analysis.")
+            icp_data.append({
+                "username": "placeholder_user",
+                "profile_data": {"username": "placeholder_user", "full_name": "Unknown", "bio": "No data available"},
+                "icp_analysis": {
+                    "is_suitable_icp": False,
+                    "reasoning": "No usable profile data could be found for analysis.",
+                    "profile_summary": "Placeholder for missing data",
+                    "interests": ["Unknown"],
+                    "demographic_indicators": [],
+                    "brand_affinities": [],
+                    "engagement_potential": "unknown"
+                }
+            })
         
         # Generate audience insights with LLM
         audience_insights = await generate_audience_insights_with_llm(icp_data, name, instagram_handle)
@@ -1435,7 +1670,9 @@ async def process_brand(brand: Dict[str, Any], quality_threshold: int = 30, use_
                 "icp_data": icp_data,
                 "comment_based_users": len(comment_icp_candidates),
                 "username_based_users": len(engaged_users),
-                "total_unique_users": len(combined_users)
+                "total_unique_users": len(combined_users),
+                "public_profiles": len(public_users),
+                "private_profiles": len(private_users)
             },
             "audience_insights": audience_insights,
             "analysis_metadata": {
